@@ -13,23 +13,41 @@ Authoritative DNS and an SMTP server on one Oracle Cloud **Always Free** VM, pro
 
 The layout and conventions follow the `infra/` directory of the bluedoter project. Config and secrets never live in this repo: they stay in `~/.dns-smtp-server/` on your machine.
 
-```
-                       internet
-  53/udp+tcp | 25 | 587 | 143 | 993 | 80 (ACME)
-  +----------+----+-----+-----+-----+------------------------------+
-  | OCI security list  ->  VM iptables (OCI ruleset + our ports)   |
-  |                                                                |
-  |  BIND9 ----- zones from ~/.dns-smtp-server/group_vars/all.yml  |
-  |                                                                |
-  |  Postfix :25 -+- mailbox  -- LMTP -> Dovecot -> Maildir        |
-  |               |                          ^                     |
-  |               +- alias    -- forward (SRS) -> your other inbox |
-  |                                          |                     |
-  |  IMAP :993 / :143 --------- Dovecot -----+                     |
-  |  Postfix :587 -- Dovecot SASL -- OpenDKIM -> recipients        |
-  |                                                                |
-  |  Ubuntu 24.04 - VM.Standard.E2.1.Micro - reserved public IP    |
-  +----------------------------------------------------------------+
+```mermaid
+flowchart TB
+    internet(["Internet"])
+    client(["Mail client or app"])
+
+    subgraph vm["Oracle Cloud VM: Ubuntu 24.04, E2.1.Micro, reserved public IP"]
+        fw["OCI security list<br>+ VM iptables"]
+        bind["BIND9<br>authoritative zones"]
+        mx["Postfix :25<br>inbound MX"]
+        submission["Postfix :587<br>submission, STARTTLS + AUTH"]
+        dkim["OpenDKIM<br>signs outgoing mail"]
+        dovecot["Dovecot<br>IMAP :993 and :143<br>SASL backend"]
+        maildir[("Maildir<br>/var/mail/vhosts")]
+    end
+
+    forward(["Your other inbox"])
+    recipients(["Recipient mail servers"])
+
+    internet -->|"53 udp+tcp"| fw
+    internet -->|"25"| fw
+    internet -->|"80, ACME only"| fw
+    client -->|"587"| fw
+    client -->|"993 or 143"| fw
+
+    fw --> bind
+    fw --> mx
+    fw --> submission
+    fw --> dovecot
+
+    mx -->|"address with a mailbox<br>LMTP"| dovecot
+    mx -->|"alias, SRS envelope<br>needs outbound 25"| forward
+    dovecot --> maildir
+    submission --> dovecot
+    submission --> dkim
+    dkim -->|"needs outbound 25"| recipients
 ```
 
 - **Configuration reference**: [docs/config.md](docs/config.md) explains every setting and secret file.

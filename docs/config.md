@@ -19,6 +19,7 @@ On your machine the tree is `~/.dns-smtp-server/`. Inside the controller contain
 - [Role defaults](#role-defaults)
 - [Controller container settings](#controller-container-settings)
 - [What gets generated on the VM](#what-gets-generated-on-the-vm)
+- [Commands](#commands)
 
 ---
 
@@ -79,10 +80,16 @@ Read by `oci-vm-create`, `oci-vm-start`, `oci-vm-stop`, `oci-vm-destroy`, and th
 The security list (ingress) is fixed in `oci-vm-create.yml`:
 
 - 22/tcp from `dnssmtp_ssh_ingress_cidr`;
-- 53/udp and 53/tcp, 25/tcp, 80/tcp (ACME only), 587/tcp, 143/tcp and 993/tcp from anywhere;
-- ICMP type 3 code 4 (path MTU).
+- 53/udp and 53/tcp (DNS), 25/tcp (inbound mail), 80/tcp (ACME only),
+  587/tcp (submission), 143/tcp and 993/tcp (IMAP) from anywhere;
+- ICMP type 3 code 4 (path MTU discovery), always;
+- ICMP type 8 (echo request, i.e. `ping`) when `dnssmtp_allow_ping` is true.
 
 Egress is open.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `dnssmtp_allow_ping` | `true` | Answer `ping`. Set to `false` and re-run `make vm-create` to drop the rule; the host stays reachable on its service ports, it just stops replying to echo requests. |
 
 ### Naming and discovery
 
@@ -155,15 +162,24 @@ dnssmtp_domains:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `dnssmtp_reverse_networks` | `[]` | `/24` prefixes (e.g. `["143.47.121"]`) to serve reverse zones for. Each one becomes a `<3rd>.<2nd>.<1st>.in-addr.arpa` zone holding a PTR for **every A record** that points into it, including `ns1`/`mail` and your own extra records. See the warning below. |
 | `dnssmtp_dns_ttl` | `3600` | Default TTL for every zone. Lower it (e.g. 300) a day before a planned IP or record change. |
-
-> **A PTR only works if the block's owner delegates it.** Reverse DNS for `143.47.121.175` lives in a zone Oracle controls, because Oracle owns the addresses. Serving that zone here is harmless but inert: no resolver will ask this server unless Oracle delegates `121.47.143.in-addr.arpa` (or an RFC 2317 slice) to it. For an OCI IP the working route is a support request, and Oracle publishes the PTR itself -- see the README. `dnssmtp_reverse_networks` is for the case where a block genuinely is delegated to you.
->
-> Also note an IP has **one** useful PTR. If several A records point at the same address, this generates several PTRs, which is legal but confuses mail receivers; keep the PTR equal to `dnssmtp_mail_hostname`.
 | `dnssmtp_spf` | `v=spf1 mx -all` | SPF for every domain: only the MX host may send. If you add a relay, include it, e.g. `v=spf1 mx include:<relay-spf-domain> -all`. |
 | `dnssmtp_dmarc_policy` | `none` | DMARC `p=`. Start with `none` and read the aggregate reports sent to `postmaster@<domain>`. Move to `quarantine`, then `reject`, once only your own mail shows up aligned. |
 | `dnssmtp_dkim_key_dir` | `/etc/dns-smtp-server/dkim` | Container path of the DKIM key directory. Leave as is. |
+| `dnssmtp_reverse_networks` | `[]` | `/24` prefixes (e.g. `["143.47.121"]`) to serve reverse (PTR) zones for. Each becomes a `<3rd>.<2nd>.<1st>.in-addr.arpa` zone holding a PTR for **every A record** pointing into it, including `ns1`/`mail` and your own extra records. Read the warning below before enabling it. |
+
+**A PTR only works if the owner of the address block delegates it.** Reverse
+DNS for an OCI address such as `143.47.121.175` lives in a zone Oracle
+controls, because Oracle owns the addresses. Serving that zone here is
+harmless but inert: no resolver will ask this server unless Oracle delegates
+`121.47.143.in-addr.arpa` (or an RFC 2317 slice) to it. For an OCI IP the
+working route is a support request, after which Oracle publishes the PTR
+itself -- see the README. `dnssmtp_reverse_networks` is for the case where a
+block genuinely is delegated to you.
+
+An IP also has only **one** useful PTR. If several A records point at the
+same address, this generates several PTRs, which is legal but confuses mail
+receivers; ask for the PTR that matches `dnssmtp_mail_hostname`.
 
 ### How serials work
 
@@ -293,7 +309,7 @@ The playbooks set these from the `dnssmtp_*` settings above. They are listed so 
 | Variable | Default | Meaning |
 |---|---|---|
 | `os_hardening_ops_user` | `ops` | Operator account: sudo without password, same SSH key as the cloud-init `ubuntu` user. |
-| `os_hardening_public_ports` | 25/tcp, 53/tcp, 53/udp, 80/tcp, 587/tcp | Ports opened in the VM firewall. Each rule is inserted **before** the `REJECT` rule that OCI's Ubuntu images ship, live and in `/etc/iptables/rules.v4`. SSH is already allowed by the image. |
+| `os_hardening_public_ports` | 25/tcp, 53/tcp, 53/udp, 80/tcp, 143/tcp, 587/tcp, 993/tcp | Ports opened in the VM firewall. Each rule is inserted **before** the `REJECT` rule that OCI's Ubuntu images ship, live and in `/etc/iptables/rules.v4`. SSH is already allowed by the image. |
 | `os_hardening_rules_v4_path` | `/etc/iptables/rules.v4` | Persisted ruleset loaded at boot. |
 | `os_hardening_fail2ban_jails` | `sshd`, `postfix`, `postfix-sasl`, `dovecot` | fail2ban jails (systemd journal backend): `[{name, filter?}]`. A ban lasts 1 h after 5 failures in 10 min. The postfix jails override the filter's journal match to `postfix@-.service`, the unit Ubuntu runs Postfix under; `dovecot` covers failed IMAP and submission logins. |
 | `os_hardening_swap_enabled` / `_size` / `_swapfile_path` | `true` / `2G` / `/swapfile` | Swap for the 1 GB micro VM. |
@@ -396,3 +412,26 @@ Useful commands on the VM:
 - `sudo doveconf -n` -- the effective Dovecot configuration
 - `sudo journalctl -u postfix@- -f`
 - `sudo fail2ban-client status`
+
+---
+
+## Commands
+
+`make help` lists them all; these are the ones that read or change the
+configuration described above.
+
+| Command | What it does |
+|---|---|
+| `make vm-create` | Network, VM and reserved public IP. Re-run after changing `dnssmtp_allow_ping` or anything else in the security list. |
+| `make vm-prep` | Applies every role. Re-run after **any** edit to `all.yml`: records, mailboxes, aliases, submission users, secondaries, TLS. |
+| `make vm-verify` | goss on the VM plus checks from the controller: zones, MX, DKIM, no open resolver, STARTTLS, IMAPS, and a cleartext IMAP login that must be refused. |
+| `make dns-check` | Every configured record, queried on the VM and through a public resolver, with the answer shown. Separates "BIND is not serving it" from "not delegated yet". |
+| `make vm-info` | The VM's address, SSH command and the IMAP/SMTP settings for a mail client. |
+| `make show-credentials` | Each mail login with its password, read from the local files. |
+| `make dkim-keygen DOMAIN=... [SELECTOR=s1]` | New DKIM key. Refuses to overwrite; use a new selector to rotate. |
+| `make smtp-password LOGIN=...` | New account password. Refuses to overwrite. |
+| `make lint` | ASCII check, yamllint and ansible-lint at the production profile. |
+| `make test-roles` / `make test-role ROLE=postfix` | molecule: converge, idempotence and goss, per role. |
+
+Both diagnostics (`vm-info`, `dns-check`) are read-only and skip the wait for
+SSH, so they work when the host is not answering.
