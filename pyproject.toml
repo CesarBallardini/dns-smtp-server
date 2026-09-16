@@ -3,6 +3,9 @@ name = "dns-smtp-server"
 version = "0.1.0"
 description = "Authoritative DNS (BIND9) + SMTP (Postfix) on an Oracle Cloud Always Free VM, provisioned with Ansible."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Cesar Ballardini" }]
 requires-python = ">=3.14"
 dependencies = []
 

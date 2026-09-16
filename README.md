@@ -293,3 +293,11 @@ The postfix scenario runs opendkim and postfix together and tests real SMTP and 
 - **DNSSEC**: a VM rebuild would regenerate signing keys and break the DS record at the registrar unless the keys are persisted like the DKIM keys.
 - **Spam filtering** (rspamd) beyond Postfix's built-in restrictions, **Sieve** rules, server-side **quotas**, webmail, POP3, and **IPv6**.
 - **Automated mailbox backups.** Configuration is in git plus `~/.dns-smtp-server/`, but the Maildirs under `/var/mail/vhosts/` on the VM are not backed up by anything here. The 50 GB boot volume is the only copy.
+
+## License
+
+MIT -- see [LICENSE](LICENSE). Copyright (c) 2026 Cesar Ballardini.
+
+The software this repository installs keeps its own licenses: BIND9 (MPL 2.0),
+Postfix (IBM Public License / EPL 2.0), Dovecot (LGPL 2.1 / MIT), OpenDKIM
+(BSD / Sendmail), postsrsd (GPL 2.0) and Alpine (Apache 2.0).
