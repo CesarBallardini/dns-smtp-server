@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+[DEFAULT]
+backend = systemd
+bantime = 1h
+findtime = 10m
+maxretry = 5
+
+{% for jail in os_hardening_fail2ban_jails %}
+[{{ jail.name }}]
+enabled = true
+{%   if jail.filter is defined %}
+filter = {{ jail.filter }}
+{%   endif %}
+
+{% endfor %}

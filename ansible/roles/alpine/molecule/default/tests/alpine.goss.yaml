@@ -1,0 +1,41 @@
+---
+# What the alpine role must produce for converge.yml.
+
+package:
+  alpine:
+    installed: true
+
+file:
+  /etc/pine.conf:
+    exists: true
+    mode: "0644"
+    contains:
+      - "inbox-path={127.0.0.1:993/imap/ssl/novalidate-cert/user=box@example.test}INBOX"
+      - "user-domain=example.test"
+      - "personal-name=Test Box"
+      - "/user=second@example.test}[]"
+      - "smtp-server=127.0.0.1:587/tls/novalidate-cert/user=box@example.test"
+      # No password is ever written to the VM.
+      - "!/password/"
+
+  # The user's own file shadows the global one, so the same keys are set
+  # there -- without discarding settings the user changed in the client.
+  /home/testops/.pinerc:
+    exists: true
+    owner: testops
+    mode: "0600"
+    contains:
+      - "inbox-path={127.0.0.1:993/imap/ssl/novalidate-cert/user=box@example.test}INBOX"
+      - "smtp-server=127.0.0.1:587/tls/novalidate-cert/user=box@example.test"
+      - "color-style=force-ansi-256color"
+
+command:
+  alpine-runs:
+    exec: "alpine -v"
+    exit-status: 0
+    stdout:
+      - "Alpine"
+  # Alpine parses the rendered configuration without complaining.
+  alpine-config-parses:
+    exec: "su - testops -c 'alpine -conf' >/dev/null"
+    exit-status: 0

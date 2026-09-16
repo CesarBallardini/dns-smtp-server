@@ -1,0 +1,15 @@
+; {{ ansible_managed }}
+; Zone content for {{ zone.name }} (everything except the SOA). A change to
+; this file bumps the SOA serial in db.{{ zone.name }}.
+$ORIGIN {{ zone.name }}.
+{% for ns in zone.nameservers %}
+@	IN	NS	{{ ns }}
+{% endfor %}
+{% for record in zone.records %}
+{%   if record.type | upper == 'TXT' %}
+{%     set escaped = record.value | replace('\\', '\\\\') | replace('"', '\\"') %}
+{{ record.name }}	{{ record.ttl | default('') }}	IN	TXT	( {% for start in range(0, escaped | length, 255) %}"{{ escaped[start:start + 255] }}" {% endfor %})
+{%   else %}
+{{ record.name }}	{{ record.ttl | default('') }}	IN	{{ record.type | upper }}	{{ record.value }}
+{%   endif %}
+{% endfor %}

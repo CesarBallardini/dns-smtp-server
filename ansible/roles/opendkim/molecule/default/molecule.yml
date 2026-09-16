@@ -1,0 +1,32 @@
+---
+# Per-role test for opendkim. Docker driver against a systemd-ready Ubuntu 24.04
+# image (the host docker.sock is mounted into the controller container).
+#
+#   make test-role ROLE=opendkim
+#   (inside `make shell`: cd ansible/roles/opendkim && molecule test)
+
+driver:
+  name: docker
+
+platforms:
+  - name: opendkim-test
+    image: geerlingguy/docker-ubuntu2404-ansible
+    pre_build_image: true
+    privileged: true
+    cgroupns_mode: host
+    command: /lib/systemd/systemd
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      - /run
+      - /tmp
+
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      stdout_callback: default
+      callback_result_format: yaml
+
+verifier:
+  name: ansible

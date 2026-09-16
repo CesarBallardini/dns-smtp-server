@@ -1,0 +1,50 @@
+---
+# opendkim + postfix together, so the verify step can prove signing end to
+# end. Forwarding destinations are local (root@localhost) because the test
+# container has no outbound port 25.
+- name: Converge -- apply opendkim + postfix
+  hosts: all
+  become: true
+  vars:
+    opendkim_keys:
+      - domain: example.test
+        selector: s1
+        private_key_src: /tmp/molecule-dkim/example.test.s1.key
+    postfix_myhostname: mail.example.test
+    # example2.test has a catch-all; example.test does not, so both paths are
+    # exercised (unknown addresses rejected vs. swallowed by the catch-all).
+    postfix_domains: [example.test, example2.test]
+    postfix_root_alias: ""
+    postfix_virtual_aliases:
+      "postmaster@example.test": "root@localhost"
+      "abuse@example.test": "root@localhost"
+      "info@example.test": ["root@localhost"]
+      "@example2.test": "catchall@example2.test"
+    # A mailbox (IMAP + submission) and a send-only account, so the verify
+    # step can prove the difference between them.
+    postfix_mailboxes:
+      - address: box@example.test
+        password: "molecule-mailbox-password-0123456789"
+      - address: catchall@example2.test
+        password: "molecule-catchall-password-0123456789"
+      # A mailbox inside the catch-all domain: it must keep its own mail
+      # instead of being swallowed by the wildcard.
+      - address: named@example2.test
+        password: "molecule-named-password-0123456789"
+    postfix_submission_users:
+      - username: app@example.test
+        password: "molecule-test-password-0123456789"
+        senders: [app@example.test, noreply@example.test]
+  pre_tasks:
+    - name: Generate a throwaway DKIM key on the controller
+      delegate_to: localhost
+      become: false
+      ansible.builtin.shell:
+        cmd: >-
+          mkdir -p /tmp/molecule-dkim &&
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048
+          -out /tmp/molecule-dkim/example.test.s1.key
+        creates: /tmp/molecule-dkim/example.test.s1.key
+  roles:
+    - role: opendkim
+    - role: postfix

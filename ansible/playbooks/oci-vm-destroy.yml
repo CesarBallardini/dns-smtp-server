@@ -1,0 +1,150 @@
+---
+# Destroy the DNS + SMTP VM and its supporting network.
+#
+# Tears down in dependency order:
+#   1. Terminate tagged instances (boot volumes deleted).
+#   2. Clear route rules from the default route table (so the IGW can go).
+#   3. Delete subnets, then Internet Gateways, then the VCN.
+#
+# KEPT on purpose: the RESERVED public IP. Glue records, MX, and the PTR
+# point at it; the next `make vm-create` re-attaches it. Release it manually
+# only when retiring the service for good (command printed at the end).
+#
+# Idempotent: no-op if no resources match the env tag. Destructive, with no
+# confirmation prompt.
+#
+#     make vm-destroy
+
+- name: Destroy the DNS + SMTP Oracle Cloud VM and supporting network
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+    # ----------------------------------------------------- Instances ---
+    - name: Find instances in the compartment
+      oracle.oci.oci_compute_instance_facts:
+        compartment_id: "{{ oci_compartment_id }}"
+      register: all_instances
+
+    # Rejects ONLY 'TERMINATED', not 'TERMINATING': a still-terminating
+    # instance holds a VNIC that would block the subnet / VCN teardown, so the
+    # terminate task below must wait for it.
+    - name: Filter instances by env tag
+      ansible.builtin.set_fact:
+        dnssmtp_instances: >-
+          {{ all_instances.instances
+             | rejectattr('lifecycle_state', 'eq', 'TERMINATED')
+             | selectattr('freeform_tags.dnssmtp', 'defined')
+             | selectattr('freeform_tags.dnssmtp', 'eq', dnssmtp_env_tag)
+             | list }}
+
+    - name: Terminate instances
+      oracle.oci.oci_compute_instance:
+        instance_id: "{{ item.id }}"
+        state: absent
+        preserve_boot_volume: false
+        wait: true
+      loop: "{{ dnssmtp_instances }}"
+      loop_control:
+        label: "{{ item.display_name }}"
+
+    # ----------------------------------------------------------- VCN ---
+    - name: Find VCNs
+      oracle.oci.oci_network_vcn_facts:
+        compartment_id: "{{ oci_compartment_id }}"
+        display_name: "{{ dnssmtp_vcn_name }}"
+      register: vcn_lookup
+
+    - name: Set VCN list
+      ansible.builtin.set_fact:
+        dnssmtp_vcns: "{{ vcn_lookup.vcns | default([]) }}"
+
+    - name: Clear default-route-table route rules (so the IGW can be deleted)
+      oracle.oci.oci_network_route_table:
+        rt_id: "{{ item.default_route_table_id }}"
+        route_rules: []
+      loop: "{{ dnssmtp_vcns }}"
+      loop_control:
+        label: "{{ item.display_name }}"
+
+    # --------------------------------------------------------- Subnets ---
+    - name: List subnets in each VCN
+      oracle.oci.oci_network_subnet_facts:
+        compartment_id: "{{ oci_compartment_id }}"
+        vcn_id: "{{ item.id }}"
+      loop: "{{ dnssmtp_vcns }}"
+      loop_control:
+        label: "{{ item.display_name }}"
+      register: subnets_per_vcn
+
+    - name: Flatten subnet list
+      ansible.builtin.set_fact:
+        dnssmtp_subnets: "{{ subnets_per_vcn.results | map(attribute='subnets') | flatten }}"
+
+    - name: Delete subnets
+      oracle.oci.oci_network_subnet:
+        subnet_id: "{{ item.id }}"
+        state: absent
+        wait: true
+      loop: "{{ dnssmtp_subnets }}"
+      loop_control:
+        label: "{{ item.display_name }}"
+
+    # ---------------------------------------------- Internet Gateways ---
+    - name: List IGWs in each VCN
+      oracle.oci.oci_network_internet_gateway_facts:
+        compartment_id: "{{ oci_compartment_id }}"
+        vcn_id: "{{ item.id }}"
+      loop: "{{ dnssmtp_vcns }}"
+      loop_control:
+        label: "{{ item.display_name }}"
+      register: igws_per_vcn
+
+    - name: Flatten IGW list
+      ansible.builtin.set_fact:
+        dnssmtp_igws: "{{ igws_per_vcn.results | map(attribute='internet_gateways') | flatten }}"
+
+    - name: Delete Internet Gateways
+      oracle.oci.oci_network_internet_gateway:
+        ig_id: "{{ item.id }}"
+        state: absent
+        wait: true
+      loop: "{{ dnssmtp_igws }}"
+      loop_control:
+        label: "{{ item.display_name }}"
+
+    - name: Delete VCNs
+      oracle.oci.oci_network_vcn:
+        vcn_id: "{{ item.id }}"
+        state: absent
+        wait: true
+      loop: "{{ dnssmtp_vcns }}"
+      loop_control:
+        label: "{{ item.display_name }}"
+
+    # ------------------------------------------- Reserved IP (kept) ---
+    - name: List reserved public IPs
+      oracle.oci.oci_network_public_ip_facts:
+        compartment_id: "{{ oci_compartment_id }}"
+        scope: "REGION"
+        lifetime: "RESERVED"
+      register: reserved_ips
+
+    - name: Find the kept reserved public IP
+      ansible.builtin.set_fact:
+        kept_public_ips: "{{ reserved_ips.public_ips | selectattr('display_name', 'eq', dnssmtp_public_ip_name) | list }}"
+
+    - name: Final report
+      ansible.builtin.debug:
+        msg: |
+          ==============================================================
+          Destroy complete.
+          Instances terminated: {{ dnssmtp_instances | length }}
+          VCNs deleted:         {{ dnssmtp_vcns | length }}
+          {% for ip in kept_public_ips %}
+          Reserved IP KEPT:     {{ ip.ip_address }} ({{ ip.display_name }})
+            Release it only when retiring the service:
+              oci network public-ip delete --public-ip-id {{ ip.id }}
+          {% endfor %}
+          ==============================================================

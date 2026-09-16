@@ -1,0 +1,35 @@
+{#- Alpine mailbox specs: {host:port/imap[/ssl][/novalidate-cert]/user=...}  -#}
+{%- macro spec(address) -%}
+{{ '{' }}{{ alpine_imap_host }}:{{ alpine_imap_port }}/imap{{ '/ssl' if alpine_imap_port == 993 else '/tls' }}{{ '' if alpine_validate_cert | bool else '/novalidate-cert' }}/user={{ address }}{{ '}' }}
+{%- endmacro -%}
+# {{ ansible_managed }}
+#
+# Global Alpine configuration. A user's ~/.pinerc overrides these, so the
+# role also sets the same keys there for alpine_users.
+{% set first = alpine_accounts[0] %}
+
+personal-name={{ alpine_personal_name }}
+user-domain={{ alpine_user_domain }}
+
+# INBOX of the first account.
+inbox-path={{ spec(first) }}INBOX
+
+# All the other folders of every account.
+folder-collections={% for account in alpine_accounts %}{{ account }} {{ spec(account) }}[]{{ ', ' if not loop.last else '' }}{% endfor %}
+
+
+# Sending goes through the submission service, which requires the same
+# credentials as IMAP.
+smtp-server={{ alpine_imap_host }}:{{ alpine_smtp_port }}/tls{{ '' if alpine_validate_cert | bool else '/novalidate-cert' }}/user={{ first }}
+
+# Saner defaults than the shipped ones.
+default-fcc={{ spec(first) }}Sent
+default-saved-msg-folder={{ spec(first) }}Archive
+postponed-folder={{ spec(first) }}Drafts
+trash-folder={{ spec(first) }}Trash
+enable-incoming-folders=
+feature-list=enable-aggregate-command-set,
+	quell-startup-greeting,
+	expanded-view-of-folders,
+	save-will-not-delete,
+	enable-sigdashes

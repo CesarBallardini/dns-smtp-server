@@ -1,0 +1,75 @@
+# What the bind9 role must produce for the converge.yml test zones.
+
+---
+package:
+  bind9:
+    installed: true
+
+service:
+  named:
+    enabled: true
+    running: true
+
+port:
+  udp:53:
+    listening: true
+  tcp:53:
+    listening: true
+
+command:
+  config-and-zones-valid:
+    exec: "named-checkconf -z"
+    exit-status: 0
+
+  soa-authoritative:
+    exec: "dig @127.0.0.1 example.test SOA +norec"
+    exit-status: 0
+    stdout:
+      - "status: NOERROR"
+      - "/flags: qr aa/"
+      - "ns1.example.test. hostmaster.example.test."
+
+  mx:
+    exec: "dig @127.0.0.1 example.test MX +short"
+    exit-status: 0
+    stdout:
+      - "10 mail.example.test."
+
+  cname:
+    exec: "dig @127.0.0.1 katra.example.test CNAME +short"
+    exit-status: 0
+    stdout:
+      - "example.github.io."
+
+  # The 400-char DKIM value must come back whole (split strings are
+  # concatenated by resolvers; dig shows them space-separated).
+  dkim-long-txt:
+    exec: "dig @127.0.0.1 s1._domainkey.example.test TXT +short | tr -d '\" '"
+    exit-status: 0
+    stdout:
+      - "/^v=DKIM1;k=rsa;p=A{392}$/"
+
+  second-zone:
+    exec: "dig @127.0.0.1 example2.test MX +short"
+    exit-status: 0
+    stdout:
+      - "10 mail.example.test."
+
+  # Authoritative only: names outside our zones are refused.
+  recursion-refused:
+    exec: "dig @127.0.0.1 example.org A"
+    exit-status: 0
+    stdout:
+      - "status: REFUSED"
+
+  zone-transfer-refused:
+    exec: "dig @127.0.0.1 example.test AXFR"
+    exit-status: 0
+    stdout:
+      - "Transfer failed"
+
+  version-hidden:
+    exec: "dig @127.0.0.1 version.bind CH TXT +short"
+    exit-status: 0
+    stdout:
+      - "!/9\\.[0-9]+/"

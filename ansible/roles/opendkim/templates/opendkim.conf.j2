@@ -1,0 +1,21 @@
+# {{ ansible_managed }}
+Syslog                  yes
+SyslogSuccess           yes
+UMask                   007
+UserID                  opendkim:opendkim
+# The packaged systemd unit is Type=forking with this PIDFile.
+PidFile                 /run/opendkim/opendkim.pid
+
+Socket                  {{ opendkim_socket }}
+
+# Sign only; inbound mail is forwarded untouched, so verifying adds nothing.
+Mode                    s
+Canonicalization        relaxed/simple
+SignatureAlgorithm      rsa-sha256
+OversignHeaders         From
+
+KeyTable                /etc/opendkim/KeyTable
+SigningTable            refile:/etc/opendkim/SigningTable
+InternalHosts           /etc/opendkim/TrustedHosts
+ExternalIgnoreList      /etc/opendkim/TrustedHosts
+MTA                     ORIGINATING

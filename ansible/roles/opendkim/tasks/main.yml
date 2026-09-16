@@ -1,0 +1,70 @@
+---
+# OpenDKIM signing milter.
+
+- name: Install OpenDKIM
+  ansible.builtin.apt:
+    name:
+      - opendkim
+      - opendkim-tools
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the key directory
+  ansible.builtin.file:
+    path: /etc/opendkim/keys
+    state: directory
+    owner: opendkim
+    group: opendkim
+    mode: "0700"
+
+# OpenDKIM refuses keys readable by anyone but its own user.
+- name: Install the private keys
+  ansible.builtin.copy:
+    src: "{{ item.private_key_src }}"
+    dest: "/etc/opendkim/keys/{{ item.domain }}.{{ item.selector }}.private"
+    owner: opendkim
+    group: opendkim
+    mode: "0600"
+  loop: "{{ opendkim_keys }}"
+  loop_control:
+    label: "{{ item.domain }} ({{ item.selector }})"
+  notify: Restart opendkim
+
+- name: Render the key and signing tables
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/opendkim/{{ item }}"
+    owner: root
+    group: opendkim
+    mode: "0640"
+  loop:
+    - KeyTable
+    - SigningTable
+  notify: Restart opendkim
+
+- name: Render the trusted hosts list
+  ansible.builtin.copy:
+    dest: /etc/opendkim/TrustedHosts
+    content: "{{ opendkim_internal_hosts | join('\n') }}\n"
+    owner: root
+    group: opendkim
+    mode: "0640"
+  notify: Restart opendkim
+
+- name: Render opendkim.conf
+  ansible.builtin.template:
+    src: opendkim.conf.j2
+    dest: /etc/opendkim.conf
+    mode: "0644"
+    validate: "opendkim -n -x %s"
+  notify: Restart opendkim
+
+- name: Apply handlers (restart with the new config before enabling)
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable + start opendkim
+  ansible.builtin.systemd_service:
+    name: opendkim
+    enabled: true
+    state: started

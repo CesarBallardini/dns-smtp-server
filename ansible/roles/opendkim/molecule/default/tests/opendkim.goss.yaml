@@ -1,0 +1,33 @@
+# What the opendkim role must produce. End-to-end signing is exercised by
+# the postfix role's scenario, which runs opendkim + postfix together.
+
+---
+service:
+  opendkim:
+    enabled: true
+    running: true
+
+port:
+  tcp:8891:
+    listening: true
+    ip:
+      - 127.0.0.1
+
+file:
+  /etc/opendkim/keys/example.test.s1.private:
+    exists: true
+    owner: opendkim
+    mode: "0600"
+  /etc/opendkim/KeyTable:
+    exists: true
+    contains:
+      - "s1._domainkey.example.test\texample.test:s1:/etc/opendkim/keys/example.test.s1.private"
+  /etc/opendkim/SigningTable:
+    exists: true
+    contains:
+      - "*@example.test\ts1._domainkey.example.test"
+
+command:
+  config-parses:
+    exec: "opendkim -n -x /etc/opendkim.conf"
+    exit-status: 0

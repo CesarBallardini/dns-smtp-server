@@ -1,0 +1,7 @@
+// {{ ansible_managed }}
+{% for zone in bind9_zones %}
+zone "{{ zone.name }}" {
+    type primary;
+    file "{{ bind9_zone_dir }}/db.{{ zone.name }}";
+};
+{% endfor %}

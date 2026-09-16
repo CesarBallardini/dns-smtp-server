@@ -1,0 +1,60 @@
+# Linux container providing a working Ansible controller (ansible-core,
+# molecule, oci-cli, goss) for operators on Windows or any host without the
+# Ansible toolchain. Prefer the Makefile targets; the raw form is:
+#
+#     docker compose -f ansible/docker-compose.yml run --rm ansible            # shell
+#     docker compose -f ansible/docker-compose.yml run --rm ansible \
+#         ansible-playbook -i /etc/dns-smtp-server/inventory.yml ansible/playbooks/host-prep.yml
+
+---
+name: dns-smtp-server-ansible
+
+services:
+  ansible:
+    build:
+      context: ..
+      dockerfile: ansible/Dockerfile
+      args:
+        UV_BASE_IMAGE: ${UV_BASE_IMAGE:-ghcr.io/astral-sh/uv:python3.14-bookworm-slim}
+    # The reserved `.invalid` TLD (RFC 2606) makes an accidental
+    # `docker compose push` fail at DNS; `pull_policy: build` builds locally.
+    image: ${ANSIBLE_IMAGE_TAG:-registry.invalid/dns-smtp-server-ansible:0.1.0}
+    pull_policy: build
+    working_dir: /workspace
+    volumes:
+      # Repo bind-mount. Read-write because molecule writes state under
+      # the scenario directories.
+      - ..:/workspace:rw
+
+      # SSH keys + OCI CLI config, read-only; the entrypoint copies them into
+      # /root with 0600 perms. ${USERPROFILE} on Windows, ${HOME} elsewhere.
+      - ${USERPROFILE:-${HOME}}/.ssh:/mnt/ssh:ro
+      - ${USERPROFILE:-${HOME}}/.oci:/mnt/oci:ro
+
+      # Inventory + group_vars + secret files. Lives OUTSIDE the repo so no
+      # OCIDs, passwords, or DKIM keys ever land in git. Ansible auto-discovers
+      # /etc/dns-smtp-server/group_vars/all.yml next to the inventory.
+      - ${USERPROFILE:-${HOME}}/.dns-smtp-server:/etc/dns-smtp-server:ro
+
+      # Docker socket for molecule's docker driver (per-role tests).
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    environment:
+      # Smoke scenario inputs (see molecule/smoke/molecule.yml).
+      DNSSMTP_HOST: ${DNSSMTP_HOST:-}
+      DNSSMTP_USER: ${DNSSMTP_USER:-ops}
+      ANSIBLE_HOST_KEY_CHECKING: "False"
+      # oracle.oci still imports deprecated ansible.module_utils paths. An
+      # ansible.cfg in the Windows-mounted workspace is ignored ("world
+      # writable directory"), so env vars are the reliable channel.
+      ANSIBLE_DEPRECATION_WARNINGS: "False"
+      ANSIBLE_ROLES_PATH: /workspace/ansible/roles
+      # Render task results (and the multi-line reports of info / dns-check /
+      # verify) as YAML instead of escaped JSON one-liners.
+      ANSIBLE_CALLBACK_RESULT_FORMAT: yaml
+      # Stream modules over SSH instead of temp files; avoids the
+      # become-unprivileged-user temp-file permission error.
+      ANSIBLE_PIPELINING: "True"
+
+    stdin_open: true
+    tty: true

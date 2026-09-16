@@ -1,0 +1,72 @@
+---
+- name: Converge -- apply os_hardening
+  hosts: all
+  become: true
+  vars:
+    # Containers cannot enable swap; the swapfile is validated on the real VM
+    # by goss/host-prep.yaml.
+    os_hardening_swap_enabled: false
+  pre_tasks:
+    # The cloud image ships sshd and an OCI-style iptables ruleset; the test
+    # container has neither.
+    - name: Install sshd
+      ansible.builtin.apt:
+        name: openssh-server
+        state: present
+        update_cache: true
+
+    # `sshd -t` (the role's config validation) refuses to run without its
+    # privilege separation directory. On a real VM sshd is already running,
+    # so it exists; in a fresh container it does not.
+    - name: Create sshd's privilege separation directory
+      ansible.builtin.file:
+        path: /run/sshd
+        state: directory
+        mode: "0755"
+
+    - name: Create a fake cloud-init user
+      ansible.builtin.user:
+        name: ubuntu
+        shell: /bin/bash
+        create_home: true
+
+    - name: Seed authorized_keys for the fake cloud-init user
+      ansible.posix.authorized_key:
+        user: ubuntu
+        key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDDgg+test+key+for+molecule molecule@test"
+
+    - name: Create /etc/iptables
+      ansible.builtin.file:
+        path: /etc/iptables
+        state: directory
+        mode: "0755"
+
+    - name: Mimic OCI's persisted ruleset
+      ansible.builtin.copy:
+        dest: /etc/iptables/rules.v4
+        mode: "0640"
+        force: false
+        content: |
+          *filter
+          :INPUT ACCEPT [0:0]
+          :FORWARD ACCEPT [0:0]
+          :OUTPUT ACCEPT [0:0]
+          -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+          -A INPUT -p icmp -j ACCEPT
+          -A INPUT -i lo -j ACCEPT
+          -A INPUT -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT
+          -A INPUT -j REJECT --reject-with icmp-host-prohibited
+          COMMIT
+
+    - name: Install iptables to load the mimic ruleset
+      ansible.builtin.apt:
+        name: iptables
+        state: present
+
+    - name: Load the mimic ruleset (first converge only)
+      ansible.builtin.shell:
+        cmd: iptables -C INPUT -j REJECT --reject-with icmp-host-prohibited 2>/dev/null || iptables-restore < /etc/iptables/rules.v4
+      changed_when: false
+
+  roles:
+    - role: os_hardening

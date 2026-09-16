@@ -1,0 +1,12 @@
+---
+- name: Verify -- opendkim is configured and listening
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Install goss
+      ansible.builtin.include_tasks: ../../../../tasks/install-goss.yml
+
+    - name: Validate with goss
+      ansible.builtin.include_tasks: ../../../../tasks/run-goss.yml
+      vars:
+        goss_spec: "{{ playbook_dir }}/tests/opendkim.goss.yaml"

@@ -1,0 +1,4 @@
+# {{ ansible_managed }}
+{% if postfix_relayhost %}
+{{ postfix_relayhost }}	{{ postfix_relayhost_username }}:{{ postfix_relayhost_password }}
+{% endif %}

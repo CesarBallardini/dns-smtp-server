@@ -1,0 +1,52 @@
+---
+# Stop a running DNS + SMTP VM. Idempotent: no-op if already STOPPED. Uses
+# the OCI STOP action (graceful ACPI shutdown, hard stop after a timeout).
+#
+# While stopped, the zones are not served and inbound mail queues at the
+# senders (they retry for days). The reserved public IP stays allocated.
+#
+#     make vm-stop
+
+- name: Stop the DNS + SMTP Oracle Cloud VM
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+    - name: Find instances in the compartment
+      oracle.oci.oci_compute_instance_facts:
+        compartment_id: "{{ oci_compartment_id }}"
+      register: all_instances
+
+    - name: Filter instances by env tag
+      ansible.builtin.set_fact:
+        dnssmtp_instances: >-
+          {{ all_instances.instances
+             | rejectattr('lifecycle_state', 'in', ['TERMINATED', 'TERMINATING'])
+             | selectattr('freeform_tags.dnssmtp', 'defined')
+             | selectattr('freeform_tags.dnssmtp', 'eq', dnssmtp_env_tag)
+             | list }}
+
+    - name: Inform if there's nothing to stop
+      ansible.builtin.debug:
+        msg: |
+          No live instance found with freeform_tag dnssmtp={{ dnssmtp_env_tag }}
+          in compartment {{ oci_compartment_id }}. Nothing to stop.
+      when: dnssmtp_instances | length == 0
+
+    - name: Stop each running instance
+      oracle.oci.oci_compute_instance_actions:
+        instance_id: "{{ item.id }}"
+        action: "stop"
+        wait: true
+      loop: "{{ dnssmtp_instances }}"
+      loop_control:
+        label: "{{ item.display_name }} ({{ item.lifecycle_state }})"
+      when: item.lifecycle_state == "RUNNING"
+
+    - name: Show resulting state
+      ansible.builtin.debug:
+        msg: "{{ item.display_name }}: now STOPPED"
+      loop: "{{ dnssmtp_instances }}"
+      loop_control:
+        label: "{{ item.display_name }}"

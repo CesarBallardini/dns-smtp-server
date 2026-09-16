@@ -1,0 +1,20 @@
+---
+- name: Rebuild aliases
+  ansible.builtin.command:
+    cmd: newaliases
+  changed_when: true
+
+- name: Restart postsrsd
+  ansible.builtin.systemd_service:
+    name: postsrsd
+    state: restarted
+
+- name: Restart dovecot
+  ansible.builtin.systemd_service:
+    name: dovecot
+    state: restarted
+
+- name: Restart postfix
+  ansible.builtin.systemd_service:
+    name: postfix
+    state: restarted

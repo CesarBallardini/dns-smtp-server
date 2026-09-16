@@ -1,0 +1,341 @@
+---
+# Create the DNS + SMTP Oracle Cloud VM and its supporting infrastructure:
+# VCN, Internet Gateway, default route, security list, public subnet,
+# compute instance, and a RESERVED public IP attached to it.
+#
+# Idempotent: re-running reuses resources by display_name. Everything is
+# tagged `dnssmtp: <env_tag>` for discovery by start / stop / destroy /
+# host-prep.
+#
+# The reserved public IP is intentionally NOT removed by oci-vm-destroy.yml:
+# glue records, MX, and the PTR record all point at it, so it must survive a
+# destroy / recreate cycle.
+#
+#     make vm-create
+
+- name: Create the DNS + SMTP Oracle Cloud VM and supporting network
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+    - name: Validate required vars are present and non-default
+      ansible.builtin.assert:
+        that:
+          - oci_compartment_id is defined
+          - "'XXXXXXXX' not in oci_compartment_id"
+          - oci_region is defined
+          - oci_availability_domain is defined
+          - "'<TENANCY-PREFIX>' not in oci_availability_domain"
+          - dnssmtp_ssh_pubkey_path is defined
+          - dnssmtp_env_tag is match('^[a-z0-9]{1,8}$')
+        fail_msg: |
+          Missing or unfilled vars. Copy ansible/group_vars/all.yml.example to
+          ~/.dns-smtp-server/group_vars/all.yml and replace the placeholders.
+          dnssmtp_env_tag must be 1-8 lowercase letters/digits.
+
+    - name: Read SSH public key
+      ansible.builtin.slurp:
+        src: "{{ dnssmtp_ssh_pubkey_path }}"
+      register: pubkey_b64
+
+    - name: Decode SSH public key
+      ansible.builtin.set_fact:
+        dnssmtp_ssh_pubkey: "{{ pubkey_b64.content | b64decode | trim }}"
+
+    # ---------------------------------------------------------------- VCN ---
+    - name: Create or reuse the VCN
+      oracle.oci.oci_network_vcn:
+        compartment_id: "{{ oci_compartment_id }}"
+        display_name: "{{ dnssmtp_vcn_name }}"
+        cidr_block: "{{ oci_vcn_cidr }}"
+        dns_label: "dnssmtp{{ dnssmtp_env_tag }}"
+        freeform_tags: "{{ dnssmtp_freeform_tags }}"
+        state: present
+      register: vcn_result
+
+    - name: Set VCN fact
+      ansible.builtin.set_fact:
+        vcn: "{{ vcn_result.vcn }}"
+
+    - name: Show VCN
+      ansible.builtin.debug:
+        msg: "VCN [{{ 'CREATED' if vcn_result.changed else 'REUSED' }}] name={{ vcn.display_name }} id={{ vcn.id }} cidr={{ vcn.cidr_block }}"
+
+    # -------------------------------------------------- Internet Gateway ---
+    - name: Create or reuse the Internet Gateway
+      oracle.oci.oci_network_internet_gateway:
+        compartment_id: "{{ oci_compartment_id }}"
+        vcn_id: "{{ vcn.id }}"
+        display_name: "{{ dnssmtp_ig_name }}"
+        is_enabled: true
+        freeform_tags: "{{ dnssmtp_freeform_tags }}"
+        state: present
+      register: igw_result
+
+    - name: Show Internet Gateway
+      ansible.builtin.debug:
+        msg: "IGW [{{ 'CREATED' if igw_result.changed else 'REUSED' }}] name={{ igw_result.internet_gateway.display_name }} id={{ igw_result.internet_gateway.id }}"
+
+    # ----------------------------------------------- Default route -> IGW ---
+    - name: Set default route to the Internet Gateway
+      oracle.oci.oci_network_route_table:
+        rt_id: "{{ vcn.default_route_table_id }}"
+        route_rules:
+          - destination: "0.0.0.0/0"
+            destination_type: "CIDR_BLOCK"
+            network_entity_id: "{{ igw_result.internet_gateway.id }}"
+        freeform_tags: "{{ dnssmtp_freeform_tags }}"
+      register: route_result
+
+    - name: Show default route table
+      ansible.builtin.debug:
+        msg: "Route table [{{ 'UPDATED' if route_result.changed else 'UNCHANGED' }}] id={{ vcn.default_route_table_id }} 0.0.0.0/0 -> IGW"
+
+    # ---------------------------------------------------- Security list ---
+    # protocol "6" = TCP, "17" = UDP.
+    - name: Configure default security list (SSH, DNS, SMTP, submission, ACME)
+      oracle.oci.oci_network_security_list:
+        security_list_id: "{{ vcn.default_security_list_id }}"
+        display_name: "{{ dnssmtp_seclist_name }}"
+        ingress_security_rules:
+          - description: "SSH from operator"
+            protocol: "6"
+            source: "{{ dnssmtp_ssh_ingress_cidr }}"
+            tcp_options:
+              destination_port_range: { min: 22, max: 22 }
+          - description: "DNS over UDP"
+            protocol: "17"
+            source: "0.0.0.0/0"
+            udp_options:
+              destination_port_range: { min: 53, max: 53 }
+          - description: "DNS over TCP (large answers, zone transfers)"
+            protocol: "6"
+            source: "0.0.0.0/0"
+            tcp_options:
+              destination_port_range: { min: 53, max: 53 }
+          - description: "SMTP (inbound MX)"
+            protocol: "6"
+            source: "0.0.0.0/0"
+            tcp_options:
+              destination_port_range: { min: 25, max: 25 }
+          - description: "HTTP (Let's Encrypt HTTP-01 for the mail certificate)"
+            protocol: "6"
+            source: "0.0.0.0/0"
+            tcp_options:
+              destination_port_range: { min: 80, max: 80 }
+          - description: "SMTP submission (STARTTLS + AUTH)"
+            protocol: "6"
+            source: "0.0.0.0/0"
+            tcp_options:
+              destination_port_range: { min: 587, max: 587 }
+          - description: "IMAP (STARTTLS)"
+            protocol: "6"
+            source: "0.0.0.0/0"
+            tcp_options:
+              destination_port_range: { min: 143, max: 143 }
+          - description: "IMAPS (implicit TLS)"
+            protocol: "6"
+            source: "0.0.0.0/0"
+            tcp_options:
+              destination_port_range: { min: 993, max: 993 }
+          - description: "ICMP destination unreachable (path MTU discovery)"
+            protocol: "1"
+            source: "0.0.0.0/0"
+            icmp_options:
+              type: 3
+              code: 4
+          # Echo request, so `ping <vm>` works. Set dnssmtp_allow_ping: false
+          # to drop this rule (the host stays reachable on its service ports;
+          # only ping stops answering).
+          - "{{ {'description': 'ICMP echo request (ping)',
+                 'protocol': '1',
+                 'source': '0.0.0.0/0',
+                 'icmp_options': {'type': 8}} if dnssmtp_allow_ping | default(true) | bool else omit }}"
+        egress_security_rules:
+          - description: "Allow all egress"
+            protocol: "all"
+            destination: "0.0.0.0/0"
+        freeform_tags: "{{ dnssmtp_freeform_tags }}"
+      register: seclist_result
+
+    - name: Show security list
+      ansible.builtin.debug:
+        msg: "Security list [{{ 'UPDATED' if seclist_result.changed else 'UNCHANGED' }}] ingress=[22/tcp from {{ dnssmtp_ssh_ingress_cidr }}, 53/udp+tcp, 25, 80, 587, 143, 993 from 0.0.0.0/0]"
+
+    # --------------------------------------------------------- Subnet ---
+    - name: Create or reuse the public subnet
+      oracle.oci.oci_network_subnet:
+        compartment_id: "{{ oci_compartment_id }}"
+        vcn_id: "{{ vcn.id }}"
+        display_name: "{{ dnssmtp_subnet_name }}"
+        cidr_block: "{{ oci_subnet_cidr }}"
+        dns_label: "public"
+        prohibit_public_ip_on_vnic: false
+        freeform_tags: "{{ dnssmtp_freeform_tags }}"
+        state: present
+      register: subnet_result
+
+    - name: Set subnet fact
+      ansible.builtin.set_fact:
+        subnet: "{{ subnet_result.subnet }}"
+
+    - name: Show subnet
+      ansible.builtin.debug:
+        msg: "Subnet [{{ 'CREATED' if subnet_result.changed else 'REUSED' }}] name={{ subnet.display_name }} id={{ subnet.id }} cidr={{ subnet.cidr_block }}"
+
+    # --------------------------------------- Resolve image OCID if needed ---
+    - name: Auto-resolve latest Ubuntu image for the shape (when oci_image_id is null)
+      oracle.oci.oci_compute_image_facts:
+        compartment_id: "{{ oci_compartment_id }}"
+        operating_system: "Canonical Ubuntu"
+        operating_system_version: "{{ oci_image_os_version }}"
+        shape: "{{ oci_shape }}"
+        sort_by: "TIMECREATED"
+        sort_order: "DESC"
+      register: image_lookup
+      when: oci_image_id is none
+
+    - name: Set resolved image OCID
+      ansible.builtin.set_fact:
+        resolved_image_id: >-
+          {{ oci_image_id if oci_image_id is not none
+             else image_lookup.images[0].id }}
+
+    - name: Show resolved image
+      ansible.builtin.debug:
+        msg: >-
+          Image [{{ 'PINNED' if oci_image_id is not none
+                    else 'AUTO-RESOLVED latest Ubuntu ' + oci_image_os_version + ' for ' + oci_shape }}]
+          id={{ resolved_image_id }}
+
+    # -------------------------------------------------------- Instance ---
+    # Pre-look-up by display_name + non-terminated state and skip the create
+    # entirely when a match exists (oci_compute_instance's own matching is
+    # unreliable after shape changes and collides on hostname_label).
+    - name: Look up existing instances by display_name
+      oracle.oci.oci_compute_instance_facts:
+        compartment_id: "{{ oci_compartment_id }}"
+        display_name: "{{ dnssmtp_instance_name }}"
+      register: existing_instance_lookup
+
+    - name: Filter the lookup to non-terminated instances
+      ansible.builtin.set_fact:
+        live_instances: >-
+          {{ existing_instance_lookup.instances
+             | rejectattr('lifecycle_state', 'in', ['TERMINATED', 'TERMINATING'])
+             | list }}
+
+    # No ephemeral public IP: the reserved one is attached below.
+    - name: Create the compute instance (only if no live one exists)
+      oracle.oci.oci_compute_instance:
+        compartment_id: "{{ oci_compartment_id }}"
+        availability_domain: "{{ oci_availability_domain }}"
+        display_name: "{{ dnssmtp_instance_name }}"
+        shape: "{{ oci_shape }}"
+        shape_config: "{{ {'ocpus': oci_shape_ocpus, 'memory_in_gbs': oci_shape_memory_gb} if 'Flex' in oci_shape else omit }}"
+        source_details:
+          source_type: "image"
+          image_id: "{{ resolved_image_id }}"
+          boot_volume_size_in_gbs: "{{ oci_boot_volume_size_gb }}"
+        create_vnic_details:
+          subnet_id: "{{ subnet.id }}"
+          assign_public_ip: false
+          hostname_label: "dnssmtp{{ dnssmtp_env_tag }}"
+        metadata:
+          ssh_authorized_keys: "{{ dnssmtp_ssh_pubkey }}"
+        freeform_tags: "{{ dnssmtp_freeform_tags }}"
+        state: present
+        wait: true
+      register: instance_create_result
+      when: live_instances | length == 0
+
+    - name: Set instance fact
+      ansible.builtin.set_fact:
+        instance: "{{ live_instances[0] if live_instances | length > 0 else instance_create_result.instance }}"
+        instance_created: "{{ live_instances | length == 0 }}"
+
+    - name: Show compute instance
+      ansible.builtin.debug:
+        msg: "Instance [{{ 'CREATED' if instance_created else 'REUSED' }}] name={{ instance.display_name }} id={{ instance.id }} ad={{ instance.availability_domain }} shape={{ instance.shape }} state={{ instance.lifecycle_state }}"
+
+    # ------------------------------------------------ Reserved public IP ---
+    - name: Look up the instance's primary VNIC
+      oracle.oci.oci_compute_vnic_attachment_facts:
+        compartment_id: "{{ oci_compartment_id }}"
+        instance_id: "{{ instance.id }}"
+      register: vnic_attachments
+
+    - name: List the VNIC's private IPs
+      oracle.oci.oci_network_private_ip_facts:
+        vnic_id: "{{ vnic_attachments.vnic_attachments[0].vnic_id }}"
+      register: private_ips
+
+    - name: Set primary private IP fact
+      ansible.builtin.set_fact:
+        primary_private_ip: "{{ private_ips.private_ips | selectattr('is_primary') | first }}"
+
+    - name: List reserved public IPs in the compartment
+      oracle.oci.oci_network_public_ip_facts:
+        compartment_id: "{{ oci_compartment_id }}"
+        scope: "REGION"
+        lifetime: "RESERVED"
+      register: reserved_ips
+
+    - name: Find the reserved public IP by display_name
+      ansible.builtin.set_fact:
+        existing_public_ip: >-
+          {{ (reserved_ips.public_ips
+              | selectattr('display_name', 'eq', dnssmtp_public_ip_name)
+              | rejectattr('lifecycle_state', 'in', ['TERMINATED', 'TERMINATING'])
+              | list)[0] | default(None) }}
+
+    # force_create: the lookup above is the idempotency check.
+    - name: Reserve a public IP attached to the primary private IP
+      oracle.oci.oci_network_public_ip:
+        compartment_id: "{{ oci_compartment_id }}"
+        display_name: "{{ dnssmtp_public_ip_name }}"
+        lifetime: "RESERVED"
+        scope: "REGION"
+        private_ip_id: "{{ primary_private_ip.id }}"
+        freeform_tags: "{{ dnssmtp_freeform_tags }}"
+        force_create: true
+        state: present
+        wait: true
+      register: public_ip_create
+      when: existing_public_ip is none
+
+    # Re-attach an existing reservation (e.g. after destroy + create).
+    - name: Attach the existing reserved public IP to the instance
+      oracle.oci.oci_network_public_ip:
+        public_ip_id: "{{ existing_public_ip.id }}"
+        private_ip_id: "{{ primary_private_ip.id }}"
+        state: present
+        wait: true
+      register: public_ip_update
+      when:
+        - existing_public_ip is not none
+        - existing_public_ip.private_ip_id | default(None) != primary_private_ip.id
+
+    - name: Set public IP fact
+      ansible.builtin.set_fact:
+        public_ip: >-
+          {{ public_ip_create.public_ip if public_ip_create is not skipped
+             else (public_ip_update.public_ip if public_ip_update is not skipped
+                   else existing_public_ip) }}
+
+    - name: Show connection info
+      ansible.builtin.debug:
+        msg: |
+          ==============================================================
+          Instance ready: {{ dnssmtp_instance_name }}
+          Public IP:      {{ public_ip.ip_address }}  (RESERVED, survives destroy)
+          Private IP:     {{ primary_private_ip.ip_address }}
+          OCID:           {{ instance.id }}
+          AD:             {{ instance.availability_domain }}
+
+          Next:
+            1. At the registrar: glue {{ dnssmtp_ns_hostname | default('ns1.<domain>') }} -> {{ public_ip.ip_address }}
+               and NS for every domain (see README "Phase 2").
+            2. make vm-prep
+          ==============================================================

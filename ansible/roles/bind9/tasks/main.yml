@@ -1,0 +1,122 @@
+---
+# Authoritative BIND9 serving bind9_zones.
+#
+# Serial handling keeps the role idempotent: each zone is split into
+#   db.<zone>.records  -- NS + records (templated from vars)
+#   db.<zone>          -- SOA with the serial + $INCLUDE of the records file
+# The serial only moves when the records file changed (or the zone is new),
+# so re-runs with unchanged vars change nothing and secondaries are only
+# notified of real edits.
+
+- name: Install BIND9
+  ansible.builtin.apt:
+    name:
+      - bind9
+      - bind9-utils
+      - bind9-dnsutils
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Configure global options (authoritative only)
+  ansible.builtin.template:
+    src: named.conf.options.j2
+    dest: /etc/bind/named.conf.options
+    owner: root
+    group: bind
+    mode: "0644"
+    validate: "named-checkconf %s"
+  notify: Reload named
+
+- name: Create the zone directory
+  ansible.builtin.file:
+    path: "{{ bind9_zone_dir }}"
+    state: directory
+    owner: root
+    group: bind
+    mode: "0755"
+
+- name: Render zone records
+  ansible.builtin.template:
+    src: db.records.j2
+    dest: "{{ bind9_zone_dir }}/db.{{ zone.name }}.records"
+    owner: root
+    group: bind
+    mode: "0644"
+  loop: "{{ bind9_zones }}"
+  loop_control:
+    loop_var: zone
+    label: "{{ zone.name }}"
+  register: bind9_records
+  notify: Reload named
+
+- name: Read current zone files (for the serial)
+  ansible.builtin.slurp:
+    src: "{{ bind9_zone_dir }}/db.{{ zone.name }}"
+  loop: "{{ bind9_zones }}"
+  loop_control:
+    loop_var: zone
+    label: "{{ zone.name }}"
+  register: bind9_current_zones
+  failed_when: false
+
+- name: Compute SOA serials
+  ansible.builtin.set_fact:
+    bind9_serials: >-
+      {{ bind9_serials | default({}) | combine({
+           zone.name: (
+             [ansible_facts['date_time']['epoch'] | int, current + 1] | max
+             if (bind9_records.results[index].changed or current == 0)
+             else current
+           )
+         }) }}
+  vars:
+    # Empty list when the zone file does not exist yet, or has no serial.
+    # Single backslashes: a YAML folded scalar passes them through untouched,
+    # and doubling them would reach the regex as literal backslashes.
+    found: >-
+      {{ (bind9_current_zones.results[index].content | default('') | b64decode)
+         | regex_findall('(\d+)\s*; serial') }}
+    current: "{{ (found[0] | int) if (found | length > 0) else 0 }}"
+  loop: "{{ bind9_zones }}"
+  loop_control:
+    loop_var: zone
+    index_var: index
+    label: "{{ zone.name }}"
+
+- name: Render zone files (SOA + include)
+  ansible.builtin.template:
+    src: db.zone.j2
+    dest: "{{ bind9_zone_dir }}/db.{{ zone.name }}"
+    owner: root
+    group: bind
+    mode: "0644"
+  vars:
+    zone_serial: "{{ bind9_serials[zone.name] }}"
+  loop: "{{ bind9_zones }}"
+  loop_control:
+    loop_var: zone
+    label: "{{ zone.name }}"
+  notify: Reload named
+
+- name: Declare the zones
+  ansible.builtin.template:
+    src: named.conf.local.j2
+    dest: /etc/bind/named.conf.local
+    owner: root
+    group: bind
+    mode: "0644"
+  notify: Reload named
+
+# Checks the full configuration AND loads every zone, so a bad record fails
+# the play before the reload handler runs.
+- name: Validate configuration and zones
+  ansible.builtin.command:
+    cmd: named-checkconf -z
+  changed_when: false
+
+- name: Enable + start named
+  ansible.builtin.systemd_service:
+    name: named
+    enabled: true
+    state: started

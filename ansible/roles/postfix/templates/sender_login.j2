@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# sender address  SASL login(s) allowed to use it
+{% for sender in postfix_accounts | map(attribute='senders') | flatten | unique | sort %}
+{{ sender }}	{{ postfix_accounts | selectattr('senders', 'contains', sender) | map(attribute='username') | join(', ') }}
+{% endfor %}

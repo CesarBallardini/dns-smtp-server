@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# Envelope sender -> relayhost. First match wins; DUNNO keeps the default
+# (direct delivery).
+{% if postfix_relayhost %}
+# Forwarded mail carries an SRS sender in our domain but a foreign From:
+# header, which a smarthost would reject. Deliver it directly.
+/^SRS[01][=+-]/	DUNNO
+{%   for domain in postfix_domains %}
+/@{{ domain | regex_escape }}$/	{{ postfix_relayhost }}
+{%   endfor %}
+{% endif %}

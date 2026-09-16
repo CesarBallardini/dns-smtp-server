@@ -1,0 +1,22 @@
+---
+- name: Converge -- apply opendkim
+  hosts: all
+  become: true
+  vars:
+    opendkim_keys:
+      - domain: example.test
+        selector: s1
+        private_key_src: /tmp/molecule-dkim/example.test.s1.key
+  pre_tasks:
+    # Stands in for `make dkim-keygen` on the operator's machine.
+    - name: Generate a throwaway DKIM key on the controller
+      delegate_to: localhost
+      become: false
+      ansible.builtin.shell:
+        cmd: >-
+          mkdir -p /tmp/molecule-dkim &&
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048
+          -out /tmp/molecule-dkim/example.test.s1.key
+        creates: /tmp/molecule-dkim/example.test.s1.key
+  roles:
+    - role: opendkim

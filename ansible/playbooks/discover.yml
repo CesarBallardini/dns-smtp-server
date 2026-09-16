@@ -1,0 +1,78 @@
+---
+# Discover the running DNS + SMTP VM by tag and add it to the runtime
+# `oracle_cloud` inventory group. Imported by host-prep.yml and verify.yml,
+# so no VM address is ever typed by hand.
+
+- name: Discover the running DNS + SMTP VM
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+    - name: Find instances in the compartment
+      oracle.oci.oci_compute_instance_facts:
+        compartment_id: "{{ oci_compartment_id }}"
+      register: all_instances
+
+    - name: Filter to a single live instance with the env tag
+      ansible.builtin.set_fact:
+        target_instance: >-
+          {{ (all_instances.instances
+              | rejectattr('lifecycle_state', 'in', ['TERMINATED', 'TERMINATING'])
+              | selectattr('freeform_tags.dnssmtp', 'defined')
+              | selectattr('freeform_tags.dnssmtp', 'eq', dnssmtp_env_tag)
+              | list)[0] | default(None) }}
+
+    - name: Fail when no instance matches
+      ansible.builtin.fail:
+        msg: |
+          No live instance found with freeform_tag dnssmtp={{ dnssmtp_env_tag }}
+          in compartment {{ oci_compartment_id }}. Run `make vm-create` first.
+      when: target_instance is none
+
+    - name: Look up the instance's primary VNIC
+      oracle.oci.oci_compute_vnic_attachment_facts:
+        compartment_id: "{{ oci_compartment_id }}"
+        instance_id: "{{ target_instance.id }}"
+      register: vnic_attachments
+
+    - name: Get the public IP from the VNIC
+      oracle.oci.oci_network_vnic_facts:
+        vnic_id: "{{ vnic_attachments.vnic_attachments[0].vnic_id }}"
+      register: vnic_info
+
+    - name: Fail when the VNIC has no public IP
+      ansible.builtin.fail:
+        msg: "Instance {{ target_instance.display_name }} has no public IP. Re-run `make vm-create` to attach the reserved IP."
+      when: not (vnic_info.vnic.public_ip | default(''))
+
+    # First connection uses the cloud-init `ubuntu` user; os_hardening
+    # authorizes the same key for `ops`.
+    - name: Register the VM in a runtime inventory group
+      ansible.builtin.add_host:
+        name: "dnssmtp-{{ dnssmtp_env_tag }}"
+        ansible_host: "{{ vnic_info.vnic.public_ip }}"
+        ansible_user: ubuntu
+        ansible_python_interpreter: /usr/bin/python3
+        dnssmtp_public_ip: "{{ vnic_info.vnic.public_ip }}"
+        groups: oracle_cloud
+
+    - name: Show the target
+      ansible.builtin.debug:
+        msg: |
+          Target: {{ target_instance.display_name }}
+          OCID:   {{ target_instance.id }}
+          IP:     {{ vnic_info.vnic.public_ip }}
+          State:  {{ target_instance.lifecycle_state }}
+
+    # Skipped by the read-only playbooks (dns-check, info): they only need the
+    # address, and waiting 5 minutes for SSH is the wrong behaviour for a
+    # diagnostic you run precisely when the host is misbehaving.
+    - name: Wait for the VM's SSH port to accept connections
+      ansible.builtin.wait_for:
+        host: "{{ vnic_info.vnic.public_ip }}"
+        port: 22
+        state: started
+        delay: 5
+        timeout: 300
+      when: dnssmtp_wait_for_ssh | default(true) | bool

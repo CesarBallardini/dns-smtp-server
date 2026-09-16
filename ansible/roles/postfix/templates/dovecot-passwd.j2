@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+# Dovecot passdb: every account that may authenticate (IMAP and/or SMTP
+# submission). Passwords are stored only as SHA512-CRYPT hashes. The salt is
+# derived from the username so re-runs produce the same file.
+{% for account in postfix_accounts %}
+{{ account.username }}:{SHA512-CRYPT}{{ account.password | password_hash('sha512', (account.username | hash('sha256'))[:16]) }}::::::
+{% endfor %}

@@ -1,0 +1,134 @@
+# What the postfix role (with opendkim) must produce for converge.yml.
+
+---
+service:
+  postfix:
+    enabled: true
+    running: true
+  dovecot:
+    enabled: true
+    running: true
+  postsrsd:
+    enabled: true
+    running: true
+  opendkim:
+    enabled: true
+    running: true
+
+port:
+  tcp:25:
+    listening: true
+  tcp:587:
+    listening: true
+  tcp:143:
+    listening: true
+  tcp:993:
+    listening: true
+
+file:
+  /etc/dovecot/passwd:
+    exists: true
+    owner: root
+    group: dovecot
+    mode: "0640"
+    contains:
+      - "app@example.test:{SHA512-CRYPT}$6$"
+      - "box@example.test:{SHA512-CRYPT}$6$"
+      - "!molecule-test-password"
+      - "!molecule-mailbox-password"
+  # Only the mailbox account is in the userdb: the send-only account must not
+  # be able to open a mailbox.
+  /etc/dovecot/users:
+    exists: true
+    contains:
+      - "box@example.test::5000:5000::/var/mail/vhosts/example.test/box::"
+      - "!app@example.test"
+  /var/mail/vhosts/example.test:
+    exists: true
+    filetype: directory
+    owner: vmail
+  /etc/postfix/sasl_passwd:
+    exists: true
+    mode: "0600"
+
+command:
+  postfix-config-valid:
+    exec: "postfix check"
+    exit-status: 0
+
+  # POP3 is never enabled, and Dovecot authenticates only the configured
+  # virtual accounts -- never system users through PAM.
+  no-pop3:
+    exec: "ss -ltn '( sport = :110 or sport = :995 )' | tail -n +2"
+    exit-status: 0
+    stdout:
+      - "!/LISTEN/"
+
+  dovecot-no-pam:
+    exec: "doveconf -n passdb"
+    exit-status: 0
+    stdout:
+      - "passwd-file"
+      - "!/pam/"
+
+  # Cleartext logins are refused on unencrypted connections. Only the setting
+  # can be checked here: Dovecot exempts probes coming from the machine
+  # itself, so a local connection is always "secure" (verify.yml tests the
+  # real behaviour from a remote client).
+  dovecot-no-cleartext-auth:
+    exec: "doveconf -h disable_plaintext_auth"
+    exit-status: 0
+    stdout:
+      - "yes"
+
+  mailbox-known-to-postfix:
+    exec: "postmap -q box@example.test hash:/etc/postfix/vmailbox"
+    exit-status: 0
+
+  mailbox-known-to-dovecot:
+    exec: "doveadm user box@example.test"
+    exit-status: 0
+    stdout:
+      - "/var/mail/vhosts/example.test/box"
+
+  alias-lookup:
+    exec: "postmap -q postmaster@example.test hash:/etc/postfix/virtual"
+    exit-status: 0
+    stdout:
+      - "root@localhost"
+
+  # The wildcard catches unlisted addresses...
+  catchall-lookup:
+    exec: "postmap -q @example2.test hash:/etc/postfix/virtual"
+    exit-status: 0
+    stdout:
+      - "catchall@example2.test"
+
+  # ...while a mailbox in that domain is mapped to itself, which keeps it out
+  # of the wildcard.
+  catchall-exemption-for-mailbox:
+    exec: "postmap -q named@example2.test hash:/etc/postfix/virtual"
+    exit-status: 0
+    stdout:
+      - "named@example2.test"
+
+  sender-login-lookup:
+    exec: "postmap -q noreply@example.test hash:/etc/postfix/sender_login"
+    exit-status: 0
+    stdout:
+      - "app@example.test"
+
+  smtp-behaviour:
+    exec: "python3 /tmp/smtp_checks.py"
+    exit-status: 0
+    timeout: 300000
+    stdout:
+      - "ok: port 25 refuses to relay to foreign domains"
+      - "ok: submitted mail carries a DKIM signature for example.test"
+      - "ok: forwarded mail has an SRS envelope sender"
+      - "ok: inbound mail is readable in the IMAP mailbox"
+      - "ok: catch-all domain accepts an unlisted address"
+      - "ok: a mailbox in the catch-all domain keeps its own mail"
+      - "ok: that mail did NOT go to the catch-all instead"
+      - "ok: IMAP refuses a send-only account"
+      - "ok: IMAP on 143 accepts login after STARTTLS"

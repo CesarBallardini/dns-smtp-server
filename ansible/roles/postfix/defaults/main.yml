@@ -1,0 +1,74 @@
+---
+# Postfix + Dovecot for postfix_domains:
+#   - mailboxes (postfix_mailboxes): mail is stored on the VM in Maildir
+#     format and read over IMAP. Postfix hands it to Dovecot over LMTP.
+#   - forwarding aliases (postfix_virtual_aliases): mail is passed on to an
+#     address elsewhere, with an SRS envelope sender so SPF still passes.
+#   - submission on 587 for both mailbox accounts and send-only accounts
+#     (postfix_submission_users), DKIM-signed through the opendkim milter.
+# Addresses that are neither are rejected during the SMTP conversation.
+
+postfix_myhostname: "{{ ansible_facts['fqdn'] }}"
+
+# Domains accepted inbound.
+postfix_domains: []
+
+# Public addresses reaching this host through NAT (OCI public IP -> private
+# IP). Postfix needs them to recognise itself as the final MX.
+postfix_proxy_interfaces: []
+
+# Local mail for root / system accounts is forwarded here ("" = keep local).
+postfix_root_alias: ""
+
+# address (or "@domain" catch-all) -> destination string or list. Forwarding
+# only; an address with a mailbox must NOT appear here.
+#
+# A "@domain" entry catches every address in that domain that is not listed
+# explicitly. Mailboxes in such a domain are exempted automatically, so they
+# keep receiving their own mail. A catch-all means every random address is
+# accepted, which attracts spam -- point it at a mailbox you can empty.
+postfix_virtual_aliases: {}
+
+# Mailboxes, readable over IMAP and able to send on 587:
+#   - address: you@example.com
+#     password: "..."         # plain text from a lookup; stored hashed
+#     senders: [you@example.com, other@example.com]   # optional, default [address]
+postfix_mailboxes: []
+
+# Send-only accounts (apps): submission on 587, no mailbox, no IMAP.
+#   - username: app@example.com
+#     password: "..."
+#     senders: [app@example.com]
+postfix_submission_users: []
+
+# IMAP is set up only when there is at least one mailbox.
+postfix_imap_enabled: "{{ postfix_mailboxes | length > 0 }}"
+
+# Where Maildirs live, and the unprivileged owner Dovecot writes them as.
+postfix_mail_dir: /var/mail/vhosts
+postfix_vmail_user: vmail
+postfix_vmail_uid: 5000
+postfix_vmail_gid: 5000
+
+postfix_message_size_limit: 26214400
+
+# DNS blocklists checked on port 25, e.g. ["zen.spamhaus.org"]. Empty by
+# default: Spamhaus refuses queries relayed through cloud resolvers.
+postfix_rbls: []
+
+postfix_milters:
+  - "inet:127.0.0.1:8891"
+
+# Sender Rewriting Scheme for forwarded mail (keeps SPF passing downstream).
+postfix_srs_domain: "{{ postfix_domains | first | default(postfix_myhostname) }}"
+
+# TLS for SMTP and IMAP. Self-signed snakeoil until Let's Encrypt is enabled
+# (needs postfix_myhostname resolving publicly and port 80 reachable).
+postfix_letsencrypt_enabled: false
+postfix_letsencrypt_email: ""
+
+# Optional smarthost for mail sent FROM postfix_domains. Forwarded (SRS)
+# mail is always delivered directly.
+postfix_relayhost: ""                 # e.g. "[smtp.email.us-ashburn-1.oci.oraclecloud.com]:587"
+postfix_relayhost_username: ""
+postfix_relayhost_password: ""

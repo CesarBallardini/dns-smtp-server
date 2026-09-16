@@ -1,0 +1,32 @@
+// {{ ansible_managed }}
+// Authoritative-only: no recursion, no cache for third parties.
+options {
+    directory "/var/cache/bind";
+
+    listen-on { any; };
+    listen-on-v6 { none; };
+
+    recursion no;
+    allow-recursion { none; };
+    allow-query { any; };
+    allow-query-cache { none; };
+
+{% if bind9_secondaries | length > 0 %}
+    allow-transfer { {% for ip in bind9_secondaries %}{{ ip }}; {% endfor %}};
+    also-notify { {% for ip in bind9_secondaries %}{{ ip }}; {% endfor %}};
+    notify explicit;
+{% else %}
+    allow-transfer { none; };
+    notify no;
+{% endif %}
+
+    dnssec-validation no;
+    minimal-responses yes;
+    version none;
+    hostname none;
+    server-id none;
+
+    rate-limit {
+        responses-per-second {{ bind9_rrl_responses_per_second }};
+    };
+};

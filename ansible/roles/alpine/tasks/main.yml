@@ -1,0 +1,61 @@
+---
+# Alpine (text-mode mail client) configured against the local Dovecot.
+
+- name: Install Alpine
+  ansible.builtin.apt:
+    name: alpine
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Skip configuration when there are no mailboxes
+  ansible.builtin.meta: end_role
+  when: alpine_accounts | length == 0
+
+- name: Write the global Alpine configuration
+  ansible.builtin.template:
+    src: pine.conf.j2
+    dest: /etc/pine.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+# Alpine writes its own ~/.pinerc and a value set there (even an empty one)
+# shadows /etc/pine.conf, so the same keys are set per user. Only these keys
+# are managed; everything else the user changes in the client is preserved.
+- name: Read the managed settings back from the rendered global config
+  ansible.builtin.slurp:
+    src: /etc/pine.conf
+  register: alpine_global_conf
+
+- name: Ensure each user's ~/.pinerc exists
+  ansible.builtin.file:
+    path: "/home/{{ item }}/.pinerc"
+    state: touch
+    owner: "{{ item }}"
+    group: "{{ item }}"
+    mode: "0600"
+    access_time: preserve
+    modification_time: preserve
+  loop: "{{ alpine_users }}"
+
+- name: Apply the managed settings to each user's ~/.pinerc
+  ansible.builtin.lineinfile:
+    path: "/home/{{ item.0 }}/.pinerc"
+    regexp: "^#?{{ item.1.split('=')[0] | regex_escape }}="
+    line: "{{ item.1 }}"
+    owner: "{{ item.0 }}"
+    group: "{{ item.0 }}"
+    mode: "0600"
+  loop: "{{ alpine_users | product(managed_settings) | list }}"
+  loop_control:
+    label: "{{ item.0 }}: {{ item.1.split('=')[0] }}"
+  vars:
+    # The single-line key=value settings from the global file. Continuation
+    # lines (feature-list) stay global-only.
+    # splitlines(), not split('\n'): Jinja string literals keep backslashes
+    # as written, so '\n' would be a literal backslash plus n.
+    managed_settings: >-
+      {{ (alpine_global_conf.content | b64decode).splitlines()
+         | select('match', '^(personal-name|user-domain|inbox-path|folder-collections|smtp-server|default-fcc|default-saved-msg-folder|postponed-folder|trash-folder)=')
+         | list }}

@@ -1,0 +1,37 @@
+---
+# Operator user: sudo NOPASSWD, same SSH key as the cloud-init user.
+os_hardening_ops_user: ops
+
+# Ports opened in the host firewall, inserted before the REJECT rule that
+# OCI's Ubuntu images ship in the INPUT chain. SSH (22) is already allowed
+# by the image; who may reach it is enforced by the OCI security list.
+os_hardening_public_ports:
+  - { port: 25, proto: tcp }     # inbound mail (MX)
+  - { port: 53, proto: tcp }     # DNS (large answers, transfers)
+  - { port: 53, proto: udp }     # DNS
+  - { port: 80, proto: tcp }     # ACME HTTP-01 only
+  - { port: 143, proto: tcp }    # IMAP (STARTTLS)
+  - { port: 587, proto: tcp }    # submission (STARTTLS + AUTH)
+  - { port: 993, proto: tcp }    # IMAPS
+
+# Persistent ruleset maintained by iptables-persistent on OCI images.
+os_hardening_rules_v4_path: /etc/iptables/rules.v4
+
+# fail2ban jails (all read the systemd journal). fail2ban's stock postfix
+# filter matches the unit `postfix.service`, but on Debian/Ubuntu the daemons
+# run under `postfix@-.service`, so the filter's journalmatch is overridden.
+os_hardening_fail2ban_jails:
+  - name: sshd
+  - name: postfix
+    filter: "postfix[journalmatch='_SYSTEMD_UNIT=postfix@-.service']"
+  - name: postfix-sasl
+    filter: "postfix[mode=auth, journalmatch='_SYSTEMD_UNIT=postfix@-.service']"
+  # IMAP / SASL login attempts. dovecot.service is the correct unit here, so
+  # the stock filter needs no override.
+  - name: dovecot
+
+# Swapfile: headroom for the 1 GB E2.1.Micro during apt upgrades.
+# Disabled in the molecule test (containers can't swapon).
+os_hardening_swap_enabled: true
+os_hardening_swap_size: "2G"
+os_hardening_swapfile_path: /swapfile

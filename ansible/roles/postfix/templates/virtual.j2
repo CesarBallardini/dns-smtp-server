@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+# address  destination[, destination...]
+{% set catchall_domains = postfix_virtual_aliases.keys() | select('match', '^@') | map('regex_replace', '^@', '') | list %}
+{% if catchall_domains | length > 0 %}
+# A "@domain" catch-all would also swallow mail for addresses that have their
+# own mailbox in that domain, because Postfix falls back to the wildcard when
+# the full address is not in this table. Mapping each of those addresses to
+# itself keeps it out of the catch-all.
+{%   for account in postfix_accounts if account.mailbox and account.mailbox.domain in catchall_domains %}
+{{ account.username }}	{{ account.username }}
+{%   endfor %}
+
+{% endif %}
+{% for address, destination in postfix_virtual_aliases | dictsort %}
+{{ address }}	{{ [destination] | flatten | join(', ') }}
+{% endfor %}

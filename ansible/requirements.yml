@@ -1,0 +1,18 @@
+---
+# Ansible Galaxy collections. Installed at image build time by
+# ansible/Dockerfile. Re-pin and rebuild the image when bumping versions.
+
+collections:
+  # Oracle's OCI collection: VCN, compute, public IP modules used by the
+  # oci-vm-* and host-prep playbooks.
+  - name: oracle.oci
+    version: ">=5.5.0"
+
+  # authorized_key (os_hardening seeds the ops user's SSH key).
+  - name: ansible.posix
+    version: ">=2.0.0"
+
+  # docker_container / docker_image, used by molecule's Docker driver for the
+  # per-role ephemeral test instances.
+  - name: community.docker
+    version: ">=4.0.0"

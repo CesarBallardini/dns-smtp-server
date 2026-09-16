@@ -1,0 +1,290 @@
+---
+# Postfix inbound MX (mailboxes + forwarding) and authenticated submission,
+# with Dovecot for IMAP and SASL. See defaults for the model; docs/config.md
+# for every variable.
+
+- name: Assemble the account list (mailboxes + send-only)
+  ansible.builtin.set_fact:
+    postfix_accounts: "{{ lookup('ansible.builtin.template', 'accounts.yml.j2') | from_yaml | default([], true) }}"
+  no_log: true
+
+- name: Validate the served domains
+  ansible.builtin.assert:
+    that:
+      - postfix_domains | length > 0
+      # A "@domain" catch-all already delivers both of them.
+      - ('@' ~ item) in postfix_virtual_aliases
+        or (('postmaster@' ~ item) in postfix_virtual_aliases or ('postmaster@' ~ item) in mailbox_addresses)
+      - ('@' ~ item) in postfix_virtual_aliases
+        or (('abuse@' ~ item) in postfix_virtual_aliases or ('abuse@' ~ item) in mailbox_addresses)
+    fail_msg: >-
+      Every served domain needs postmaster@{{ item }} and abuse@{{ item }} to be
+      deliverable: as a mailbox, as a forwarding alias, or through a
+      "@{{ item }}" catch-all.
+    quiet: true
+  vars:
+    mailbox_addresses: "{{ postfix_accounts | selectattr('mailbox') | map(attribute='username') | list }}"
+  loop: "{{ postfix_domains }}"
+
+- name: Validate the accounts
+  ansible.builtin.assert:
+    that:
+      - item.username is match('[^@]+@[^@]+')
+      - item.password | length >= 16
+      - item.senders | length > 0
+      - item.mailbox is none or item.mailbox.domain in postfix_domains
+      - item.username not in postfix_virtual_aliases
+    fail_msg: >-
+      Account {{ item.username }} must be a full e-mail address with a password of
+      at least 16 characters and at least one sender; a mailbox must live in one of
+      postfix_domains and must not also be a forwarding alias.
+    quiet: true
+  loop: "{{ postfix_accounts }}"
+  loop_control:
+    label: "{{ item.username }}"
+
+- name: Set TLS certificate paths
+  ansible.builtin.set_fact:
+    postfix_tls_cert_file: >-
+      {{ '/etc/letsencrypt/live/' ~ postfix_myhostname ~ '/fullchain.pem'
+         if postfix_letsencrypt_enabled | bool else '/etc/ssl/certs/ssl-cert-snakeoil.pem' }}
+    postfix_tls_key_file: >-
+      {{ '/etc/letsencrypt/live/' ~ postfix_myhostname ~ '/privkey.pem'
+         if postfix_letsencrypt_enabled | bool else '/etc/ssl/private/ssl-cert-snakeoil.key' }}
+
+# --------------------------------------------------------------- packages
+- name: Preseed postfix (Internet Site, no prompts)
+  ansible.builtin.debconf:
+    name: postfix
+    question: "{{ item.question }}"
+    value: "{{ item.value }}"
+    vtype: "{{ item.vtype }}"
+  loop:
+    - { question: "postfix/main_mailer_type", value: "Internet Site", vtype: "select" }
+    - { question: "postfix/mailname", value: "{{ postfix_myhostname }}", vtype: "string" }
+
+- name: Install Postfix, postsrsd, and Dovecot
+  ansible.builtin.apt:
+    name: "{{ base_packages + imap_packages + certbot_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  vars:
+    base_packages:
+      - postfix
+      - postfix-pcre
+      - postsrsd
+      - dovecot-core
+      - libsasl2-modules
+      - ssl-cert
+      - ca-certificates
+    imap_packages: "{{ ['dovecot-imapd', 'dovecot-lmtpd'] if postfix_imap_enabled | bool else [] }}"
+    certbot_packages: "{{ ['certbot'] if postfix_letsencrypt_enabled | bool else [] }}"
+
+- name: Set /etc/mailname
+  ansible.builtin.copy:
+    dest: /etc/mailname
+    content: "{{ postfix_myhostname }}\n"
+    mode: "0644"
+  notify: Restart postfix
+
+# ---------------------------------------------------------- Let's Encrypt
+# HTTP-01 with certbot's own listener on port 80 (nothing else serves HTTP).
+- name: Obtain the mail certificate from Let's Encrypt
+  ansible.builtin.command:
+    cmd: >-
+      certbot certonly --standalone --non-interactive --agree-tos
+      --email {{ postfix_letsencrypt_email | quote }}
+      --domain {{ postfix_myhostname | quote }}
+    creates: "/etc/letsencrypt/live/{{ postfix_myhostname }}/fullchain.pem"
+  when: postfix_letsencrypt_enabled | bool
+  notify:
+    - Restart postfix
+    - Restart dovecot
+
+# A renewal hook directory applies to every certificate and every renewal,
+# including ones issued before this role ran -- unlike --deploy-hook, which is
+# only recorded at issuance time.
+- name: Reload the mail services after each certificate renewal
+  ansible.builtin.copy:
+    dest: /etc/letsencrypt/renewal-hooks/deploy/reload-mail-services.sh
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      # Managed by Ansible (postfix role)
+      systemctl reload postfix
+      systemctl reload dovecot
+  when: postfix_letsencrypt_enabled | bool
+
+# ------------------------------------------------------------- postsrsd
+# Only the domain settings are managed; the packaged file keeps its secret,
+# privilege drop, chroot, and the 127.0.0.1:10001/10002 ports main.cf uses.
+# Mail from our own domains is not forwarded mail, so it is never rewritten.
+- name: Configure postsrsd
+  ansible.builtin.lineinfile:
+    path: /etc/default/postsrsd
+    regexp: "^#?{{ item.key }}="
+    line: "{{ item.key }}={{ item.value }}"
+  loop:
+    - { key: SRS_DOMAIN, value: "{{ postfix_srs_domain }}" }
+    - { key: SRS_EXCLUDE_DOMAINS, value: "{{ postfix_domains | join(',') }}" }
+  notify: Restart postsrsd
+
+- name: Enable + start postsrsd
+  ansible.builtin.systemd_service:
+    name: postsrsd
+    enabled: true
+    state: started
+
+# -------------------------------------------------------- mail storage
+- name: Create the mailbox owner
+  ansible.builtin.group:
+    name: "{{ postfix_vmail_user }}"
+    gid: "{{ postfix_vmail_gid }}"
+    system: true
+  when: postfix_imap_enabled | bool
+
+- name: Create the mailbox user
+  ansible.builtin.user:
+    name: "{{ postfix_vmail_user }}"
+    uid: "{{ postfix_vmail_uid }}"
+    group: "{{ postfix_vmail_user }}"
+    home: "{{ postfix_mail_dir }}"
+    create_home: false
+    shell: /usr/sbin/nologin
+    system: true
+  when: postfix_imap_enabled | bool
+
+# Maildirs themselves are created by Dovecot on first delivery.
+- name: Create the mail directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ postfix_vmail_user }}"
+    group: "{{ postfix_vmail_user }}"
+    mode: "0750"
+  loop: "{{ [postfix_mail_dir] + (postfix_accounts | selectattr('mailbox') | map(attribute='mailbox.domain') | unique | map('regex_replace', '^', postfix_mail_dir ~ '/') | list) }}"
+  when: postfix_imap_enabled | bool
+
+# -------------------------------------------------- dovecot (SASL + IMAP)
+- name: Configure Dovecot
+  ansible.builtin.template:
+    src: dovecot.conf.j2
+    dest: /etc/dovecot/dovecot.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart dovecot
+
+- name: Write the Dovecot passdb (hashed passwords)
+  ansible.builtin.template:
+    src: dovecot-passwd.j2
+    dest: /etc/dovecot/passwd
+    owner: root
+    group: dovecot
+    mode: "0640"
+  no_log: true
+  notify: Restart dovecot
+
+- name: Write the Dovecot userdb (mailbox owners)
+  ansible.builtin.template:
+    src: dovecot-users.j2
+    dest: /etc/dovecot/users
+    owner: root
+    group: dovecot
+    mode: "0640"
+  notify: Restart dovecot
+
+- name: Enable + start dovecot
+  ansible.builtin.systemd_service:
+    name: dovecot
+    enabled: true
+    state: started
+
+# ---------------------------------------------------------------- postfix
+- name: Render main.cf
+  ansible.builtin.template:
+    src: main.cf.j2
+    dest: /etc/postfix/main.cf
+    mode: "0644"
+  notify: Restart postfix
+
+- name: Enable the submission service (587)
+  ansible.builtin.blockinfile:
+    path: /etc/postfix/master.cf
+    marker: "# {mark} ANSIBLE MANAGED: submission"
+    block: |
+      submission inet n       -       y       -       -       smtpd
+        -o syslog_name=postfix/submission
+        -o smtpd_tls_security_level=encrypt
+        -o smtpd_tls_auth_only=yes
+        -o smtpd_sasl_auth_enable=yes
+        -o smtpd_client_restrictions=permit_sasl_authenticated,reject
+        -o smtpd_sender_restrictions=reject_sender_login_mismatch,permit_sasl_authenticated,reject
+        -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
+        -o smtpd_recipient_restrictions=
+        -o milter_macro_daemon_name=ORIGINATING
+  notify: Restart postfix
+
+- name: Render the pcre relay map
+  ansible.builtin.template:
+    src: sender_relay.pcre.j2
+    dest: /etc/postfix/sender_relay.pcre
+    mode: "0644"
+  notify: Restart postfix
+
+- name: Render hash lookup tables
+  ansible.builtin.template:
+    src: "{{ item.name }}.j2"
+    dest: "/etc/postfix/{{ item.name }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { name: virtual, mode: "0644" }
+    - { name: vmailbox, mode: "0644" }
+    - { name: sender_login, mode: "0644" }
+    - { name: tls_policy, mode: "0644" }
+    - { name: sasl_passwd, mode: "0600" }
+  loop_control:
+    label: "{{ item.name }}"
+  register: postfix_maps
+  no_log: "{{ item.name == 'sasl_passwd' }}"
+
+- name: Check compiled lookup tables
+  ansible.builtin.stat:
+    path: "/etc/postfix/{{ item.item.name }}.db"
+  loop: "{{ postfix_maps.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  register: postfix_map_dbs
+
+- name: Compile changed lookup tables
+  ansible.builtin.command:
+    cmd: "postmap hash:/etc/postfix/{{ item.item.item.name }}"
+  loop: "{{ postfix_map_dbs.results }}"
+  loop_control:
+    label: "{{ item.item.item.name }}"
+  when: item.item.changed or not item.stat.exists
+  changed_when: true
+  notify: Restart postfix
+
+- name: Forward root's local mail
+  ansible.builtin.lineinfile:
+    path: /etc/aliases
+    regexp: '^root:'
+    line: "root: {{ postfix_root_alias }}"
+    state: "{{ 'present' if postfix_root_alias else 'absent' }}"
+  notify: Rebuild aliases
+
+- name: Apply handlers before validating
+  ansible.builtin.meta: flush_handlers
+
+- name: Validate the Postfix configuration
+  ansible.builtin.command:
+    cmd: postfix check
+  changed_when: false
+
+- name: Enable + start postfix
+  ansible.builtin.systemd_service:
+    name: postfix
+    enabled: true
+    state: started

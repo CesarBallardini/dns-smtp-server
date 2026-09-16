@@ -1,0 +1,38 @@
+---
+- name: Converge -- apply alpine
+  hosts: all
+  become: true
+  vars:
+    alpine_users: [testops]
+    alpine_personal_name: Test Box
+    alpine_accounts:
+      - box@example.test
+      - second@example.test
+  pre_tasks:
+    - name: Create the user whose ~/.pinerc is managed
+      ansible.builtin.user:
+        name: testops
+        create_home: true
+
+    # Alpine writes every known key into ~/.pinerc, empty when unset, and an
+    # empty local value shadows /etc/pine.conf. Reproduce that here so the
+    # role is tested against the file it will really meet.
+    - name: Pre-create a stock-looking ~/.pinerc
+      ansible.builtin.copy:
+        dest: /home/testops/.pinerc
+        owner: testops
+        group: testops
+        mode: "0600"
+        force: false
+        content: |
+          # Alpine configuration file
+          personal-name=
+          user-domain=
+          smtp-server=
+          inbox-path=
+          folder-collections=
+          # a setting the user changed, which must survive
+          color-style=force-ansi-256color
+
+  roles:
+    - role: alpine

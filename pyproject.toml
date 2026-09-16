@@ -1,0 +1,27 @@
+[project]
+name = "dns-smtp-server"
+version = "0.1.0"
+description = "Authoritative DNS (BIND9) + SMTP (Postfix) on an Oracle Cloud Always Free VM, provisioned with Ansible."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
+
+# Operator tooling only -- there is no Python package in this repo. The
+# `deploy` group is what the dockerized Ansible controller bakes into its venv
+# (ansible/Dockerfile). `oci-cli` is NOT listed here: its tight pins would fight
+# ansible-core / molecule, so the Dockerfile installs it as an isolated
+# `uv tool`. The `oci` SDK below is what the oracle.oci collection imports.
+[dependency-groups]
+deploy = [
+    "ansible-core>=2.20",
+    "ansible-lint>=25.0",
+    "docker>=7.1",
+    "molecule>=25.0",
+    "molecule-plugins[docker]>=23.7",
+    "oci>=2.160",
+    "yamllint>=1.35",
+]
+
+[tool.uv]
+package = false
+default-groups = []

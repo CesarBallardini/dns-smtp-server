@@ -1,0 +1,12 @@
+---
+- name: Verify -- alpine is installed and pointed at the mailboxes
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Install goss
+      ansible.builtin.include_tasks: ../../../../tasks/install-goss.yml
+
+    - name: Validate with goss
+      ansible.builtin.include_tasks: ../../../../tasks/run-goss.yml
+      vars:
+        goss_spec: "{{ playbook_dir }}/tests/alpine.goss.yaml"

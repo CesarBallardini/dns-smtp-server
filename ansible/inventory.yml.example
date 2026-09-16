@@ -1,0 +1,13 @@
+---
+# Copy to ~/.dns-smtp-server/inventory.yml.
+#
+# The OCI playbooks talk to the Oracle Cloud API from localhost; host-prep
+# discovers the VM by tag at runtime and adds it to the `oracle_cloud` group,
+# so no VM address is needed here. Authentication is read from ~/.oci/config
+# (copied into the container as /root/.oci by the entrypoint).
+
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+      ansible_python_interpreter: "{{ ansible_playbook_python }}"

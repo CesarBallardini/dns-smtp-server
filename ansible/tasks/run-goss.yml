@@ -1,0 +1,37 @@
+---
+# Copy a goss spec to the target host and validate it.
+#   goss_spec: absolute path of the spec on the controller
+#   goss_vars: optional dict exposed to the spec as .Vars
+
+- name: Copy the goss spec to the host
+  ansible.builtin.copy:
+    src: "{{ goss_spec }}"
+    dest: "/tmp/{{ goss_spec | basename }}"
+    mode: "0644"
+
+- name: Run goss validate
+  become: true
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/goss
+      - --gossfile
+      - "/tmp/{{ goss_spec | basename }}"
+      - --vars-inline
+      - "{{ goss_vars | default({}) | to_json }}"
+      - validate
+      - --format
+      - documentation
+      - --no-color
+  register: goss_run
+  changed_when: false
+  failed_when: false
+
+- name: Show goss output
+  ansible.builtin.debug:
+    var: goss_run.stdout_lines
+
+- name: Fail when goss reported failures
+  ansible.builtin.assert:
+    that: goss_run.rc == 0
+    fail_msg: "goss validate failed (see output above)"
+    quiet: true

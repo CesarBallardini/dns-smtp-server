@@ -1,0 +1,151 @@
+---
+# Copy to ~/.dns-smtp-server/group_vars/all.yml and fill in the placeholders.
+# Every variable is explained in docs/config.md.
+#
+# This file holds identifiers, not secrets. Secret VALUES (SMTP passwords,
+# relay credentials) and DKIM private keys are read at run time from separate
+# chmod-600 files under ~/.dns-smtp-server/ (mounted read-only at
+# /etc/dns-smtp-server inside the controller). Never paste a secret here.
+#
+# Lookup commands (run inside `make shell`):
+#   compartment OCIDs:     oci iam compartment list --all
+#   availability domains:  oci iam availability-domain list
+#   your public IP:        curl -sf https://api.ipify.org
+
+# ===========================================================================
+# OCI -- required by oci-vm-create / start / stop / destroy / host-prep
+# ===========================================================================
+
+oci_compartment_id: "ocid1.compartment.oc1..XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+oci_region: "us-ashburn-1"                     # must be your tenancy's home region for Always Free
+oci_availability_domain: "<TENANCY-PREFIX>:US-ASHBURN-AD-1"
+
+dnssmtp_ssh_pubkey_path: "/root/.ssh/id_ed25519.pub"   # container path of ~/.ssh/id_ed25519.pub
+dnssmtp_ssh_ingress_cidr: "0.0.0.0/0"                  # narrow to "<your-ip>/32" if your IP is stable
+
+# Compute. E2.1.Micro (x86, 1/8 OCPU, 1 GB) is Always Free and plenty for
+# BIND + Postfix. oci_shape_ocpus / oci_shape_memory_gb only apply to Flex
+# shapes (e.g. VM.Standard.A1.Flex).
+oci_shape: "VM.Standard.E2.1.Micro"
+oci_shape_ocpus: 1
+oci_shape_memory_gb: 6
+oci_boot_volume_size_gb: 50
+oci_image_id: null                 # null = latest Canonical Ubuntu <oci_image_os_version> for the shape
+oci_image_os_version: "24.04"
+
+oci_vcn_cidr: "10.0.0.0/16"
+oci_subnet_cidr: "10.0.0.0/24"
+
+# Discovery key: every OCI resource is tagged `dnssmtp: <env_tag>`.
+# Lowercase letters/digits only, max 8 chars (it is part of OCI DNS labels).
+dnssmtp_env_tag: "prod"
+
+dnssmtp_vcn_name: "dnssmtp-{{ dnssmtp_env_tag }}-vcn"
+dnssmtp_subnet_name: "dnssmtp-{{ dnssmtp_env_tag }}-public"
+dnssmtp_ig_name: "dnssmtp-{{ dnssmtp_env_tag }}-igw"
+dnssmtp_seclist_name: "dnssmtp-{{ dnssmtp_env_tag }}-seclist"
+dnssmtp_instance_name: "dnssmtp-{{ dnssmtp_env_tag }}"
+dnssmtp_public_ip_name: "dnssmtp-{{ dnssmtp_env_tag }}-ip"
+dnssmtp_freeform_tags:
+  dnssmtp: "{{ dnssmtp_env_tag }}"
+  managed_by: "ansible"
+
+# ===========================================================================
+# DNS -- zones served authoritatively by BIND9 on the VM
+# ===========================================================================
+
+# Each domain gets: NS, MX -> dnssmtp_mail_hostname, SPF, DMARC, and the DKIM
+# TXT record (public key derived from the private key file). `records` adds
+# anything else. Record names are relative to the zone ("@" = apex); a target
+# that is a hostname must end with a dot.
+dnssmtp_domains:
+  - name: "gnandu.com.ar"
+    dkim_selector: "s1"
+    records: []
+  - name: "ballardini.com.ar"
+    dkim_selector: "s1"
+    records:
+      - { name: "katra", type: "CNAME", value: "cesarballardini.github.io." }
+
+# Host names of this server. They are created as A records inside whichever
+# served zone contains them, and must be registered as glue at the registrar.
+dnssmtp_primary_domain: "{{ dnssmtp_domains[0].name }}"
+dnssmtp_ns_hostname: "ns1.{{ dnssmtp_primary_domain }}"
+dnssmtp_mail_hostname: "mail.{{ dnssmtp_primary_domain }}"
+
+# Additional authoritative nameservers (e.g. a free secondary service) --
+# fully-qualified names with the trailing dot -- and the IPs allowed to
+# AXFR the zones / receive NOTIFY.
+dnssmtp_extra_nameservers: []      # e.g. ["ns2.he.net.", "ns3.he.net."]
+bind9_secondaries: []              # e.g. ["216.218.133.2"]
+
+# Reverse (PTR) zones to serve, as /24 prefixes. For each network listed, a
+# <third>.<second>.<first>.in-addr.arpa zone is built with a PTR for every A
+# record pointing into it.
+#
+# IMPORTANT: a PTR is only answered if the OWNER of the address block
+# delegates that in-addr.arpa zone to this server. For an Oracle IP you do
+# not own the block: Oracle sets the PTR for you on request (README Phase 2),
+# and the zone below is then unused. Leave empty unless a block really is
+# delegated here.
+dnssmtp_reverse_networks: []
+#   dnssmtp_reverse_networks: ["143.47.121"]
+
+dnssmtp_dns_ttl: 3600
+dnssmtp_spf: "v=spf1 mx -all"
+dnssmtp_dmarc_policy: "none"       # start with "none", move to "quarantine"/"reject" once reports look clean
+
+# ===========================================================================
+# SMTP -- Postfix MX with IMAP mailboxes and/or forwarding, plus
+#         authenticated submission (587)
+# ===========================================================================
+
+# Where postmaster@, abuse@, hostmaster@ and root mail for EVERY served domain
+# goes, unless that address has a mailbox below. An address outside the served
+# domains (it is forwarded off this host).
+dnssmtp_admin_email: "you@example.net"
+
+# --- Mailboxes: mail is STORED on the VM and read over IMAP ---------------
+# Each account can also send through submission (587). Create its password
+# first -- `make smtp-password LOGIN=<address>` writes the chmod-600 file:
+#   ~/.dns-smtp-server/smtp-users/<address>
+# IMAP client: server = dnssmtp_mail_hostname, port 993 (implicit TLS) or 143
+# (STARTTLS), username = the full address, password = that file's contents.
+postfix_mailboxes: []
+#   - address: "cesar@ballardini.com.ar"
+#     password: "{{ lookup('file', '/etc/dns-smtp-server/smtp-users/cesar@ballardini.com.ar') | trim }}"
+#     senders: ["cesar@ballardini.com.ar"]   # optional, defaults to [address]
+#   - address: "postmaster@gnandu.com.ar"
+#     password: "{{ lookup('file', '/etc/dns-smtp-server/smtp-users/postmaster@gnandu.com.ar') | trim }}"
+
+# --- Forwarding aliases: mail is passed on to a mailbox elsewhere ---------
+# Key = address (or "@domain" catch-all), value = one destination or a list.
+# An address with a mailbox above must NOT appear here.
+# NOTE: forwarding needs outbound port 25, i.e. the OCI exemption. Mailboxes
+# do not: they work as soon as the MX record points here.
+postfix_virtual_aliases: {}
+#   "info@gnandu.com.ar": ["you@example.net", "partner@example.org"]
+
+# --- Send-only accounts: submission (587) only, no mailbox, no IMAP ------
+postfix_submission_users: []
+#   - username: "noreply@ballardini.com.ar"
+#     password: "{{ lookup('file', '/etc/dns-smtp-server/smtp-users/noreply@ballardini.com.ar') | trim }}"
+#     senders: ["noreply@ballardini.com.ar"]
+
+# DKIM private keys: ~/.dns-smtp-server/dkim/<domain>.<selector>.key
+# (generate with `make dkim-keygen DOMAIN=<domain> SELECTOR=<selector>`).
+dnssmtp_dkim_key_dir: "/etc/dns-smtp-server/dkim"
+
+# TLS for 25/587/143/993. Starts with the self-signed snakeoil cert, which
+# IMAP clients will warn about; flip to true once dnssmtp_mail_hostname
+# resolves publicly, then re-run `make vm-prep`.
+postfix_letsencrypt_enabled: false
+postfix_letsencrypt_email: "{{ dnssmtp_admin_email }}"
+
+# Optional smarthost for mail FROM the served domains (e.g. OCI Email
+# Delivery). Forwarded (SRS) mail always goes direct and needs the OCI
+# port-25 exemption. Leave empty for direct delivery of everything.
+postfix_relayhost: ""
+#   postfix_relayhost: "[smtp.email.us-ashburn-1.oci.oraclecloud.com]:587"
+#   postfix_relayhost_username: "{{ lookup('file', '/etc/dns-smtp-server/relay_username') | trim }}"
+#   postfix_relayhost_password: "{{ lookup('file', '/etc/dns-smtp-server/relay_password') | trim }}"

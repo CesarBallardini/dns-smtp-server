@@ -1,0 +1,30 @@
+---
+# Alpine, the text-mode mail client, for reading the mailboxes over SSH.
+#
+# It talks to Dovecot on the loopback interface, so nothing new is exposed and
+# no password is stored on the VM: Alpine asks for it at each start (and can
+# keep it for the session).
+#
+# alpine_accounts: mail addresses; the first one becomes the INBOX.
+alpine_accounts: []
+# Shown as the From: display name when sending.
+alpine_personal_name: ""
+# Domain appended to unqualified addresses, and used in the From: header.
+# Defaults to the domain of the first account.
+alpine_user_domain: "{{ (alpine_accounts | first | default('@')).split('@')[1] }}"
+
+# Where the client connects. Loopback only.
+alpine_imap_host: "127.0.0.1"
+alpine_imap_port: 993
+alpine_smtp_port: 587
+
+# The certificate is the self-signed snakeoil one until Let's Encrypt is
+# enabled, and it is issued for the mail host name, not for 127.0.0.1 -- so
+# certificate validation is off for these loopback connections. The traffic
+# never leaves the machine.
+alpine_validate_cert: false
+
+# Users whose ~/.pinerc gets the managed settings. The global /etc/pine.conf
+# is written too, for any other account.
+alpine_users:
+  - ops

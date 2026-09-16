@@ -1,0 +1,143 @@
+---
+# Query every name this server is supposed to answer for, from the controller.
+#
+# Each record configured in dnssmtp_domains (plus the ones derived from it --
+# NS, MX, SPF, DMARC, DKIM, the ns/mail A records) is asked twice:
+#   * directly to the VM's public IP  -> is BIND serving it?
+#   * to a public resolver (1.1.1.1)  -> does the internet see it, i.e. has
+#                                        the registrar delegation happened?
+# Read-only: it changes nothing and never needs SSH to the VM.
+#
+#     make dns-check
+
+- name: Discover the VM
+  ansible.builtin.import_playbook: discover.yml
+
+- name: Check every configured DNS name
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    vm_host: "dnssmtp-{{ dnssmtp_env_tag }}"
+    ip: "{{ hostvars['dnssmtp-' ~ dnssmtp_env_tag].dnssmtp_public_ip }}"
+    public_resolver: "1.1.1.1"
+
+  tasks:
+
+    - name: Derive the zones from the dnssmtp_* vars
+      ansible.builtin.set_fact:
+        dnssmtp_derived: "{{ lookup('ansible.builtin.template', 'templates/dnssmtp-derived.yml.j2') | from_yaml }}"
+      vars:
+        dnssmtp_public_ip: "{{ ip }}"
+
+    # One flat list of {zone, fqdn, type, expected} to query.
+    - name: Build the check list
+      ansible.builtin.set_fact:
+        dns_checks: >-
+          {{ dns_checks | default([]) + [{
+               'zone': zone_item.0.name,
+               'fqdn': (zone_item.0.name if zone_item.1.name == '@'
+                        else zone_item.1.name ~ '.' ~ zone_item.0.name),
+               'type': zone_item.1.type | upper,
+               'expected': zone_item.1.value
+             }] }}
+      loop: "{{ dnssmtp_derived.bind9_zones | subelements('records') }}"
+      loop_control:
+        loop_var: zone_item
+        label: "{{ zone_item.1.name }}.{{ zone_item.0.name }} {{ zone_item.1.type }}"
+
+    - name: Ask the VM directly
+      ansible.builtin.command:
+        argv: [dig, +short, +tries=1, +time=5, "@{{ ip }}", "{{ item.fqdn }}", "{{ item.type }}"]
+      register: vm_answers
+      changed_when: false
+      failed_when: false
+      loop: "{{ dns_checks }}"
+      loop_control:
+        label: "{{ item.fqdn }} {{ item.type }}"
+
+    - name: Ask a public resolver
+      ansible.builtin.command:
+        argv: [dig, +short, +tries=1, +time=5, "@{{ public_resolver }}", "{{ item.fqdn }}", "{{ item.type }}"]
+      register: public_answers
+      changed_when: false
+      failed_when: false
+      loop: "{{ dns_checks }}"
+      loop_control:
+        label: "{{ item.fqdn }} {{ item.type }}"
+
+    - name: Check each zone's SOA is authoritative on the VM
+      ansible.builtin.command:
+        argv: [dig, +norec, +tries=1, +time=5, "@{{ ip }}", "{{ item.name }}", SOA]
+      register: soa_answers
+      changed_when: false
+      failed_when: false
+      loop: "{{ dnssmtp_derived.bind9_zones }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check the delegation at the public resolver
+      ansible.builtin.command:
+        argv: [dig, +short, +tries=1, +time=5, "@{{ public_resolver }}", "{{ item.name }}", NS]
+      register: ns_answers
+      changed_when: false
+      failed_when: false
+      loop: "{{ dnssmtp_derived.bind9_zones }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # Values are compared loosely: quotes and whitespace differ between how a
+    # value is written in the config and how dig prints it (TXT strings are
+    # split at 255 bytes, for instance).
+    - name: Show the zone summary
+      ansible.builtin.debug:
+        msg: |
+          =====================================================================
+          DNS check against {{ ip }}  (public view via {{ public_resolver }})
+          =====================================================================
+          {% for zone in dnssmtp_derived.bind9_zones %}
+          {% set soa = soa_answers.results[loop.index0] %}
+          {% set ns = ns_answers.results[loop.index0] %}
+          zone {{ zone.name }}
+            served by the VM : {{ 'YES (authoritative)' if ('status: NOERROR' in soa.stdout and ' aa' in soa.stdout)
+                                   else 'NO -- ' ~ ('no answer on port 53' if soa.stdout == '' else 'not authoritative') }}
+            delegated to     : {{ ns.stdout_lines | join(', ') | default('(no NS in public DNS)', true) }}
+            expected         : {{ ([dnssmtp_ns_hostname ~ '.'] + dnssmtp_extra_nameservers) | join(', ') }}
+          {% endfor %}
+          =====================================================================
+
+    # The verdicts are computed in a real loop, one row at a time. Doing the
+    # same comparison inside one big report template silently misbehaved.
+    - name: Compare each answer with the configured value
+      ansible.builtin.set_fact:
+        dns_rows: "{{ dns_rows | default([]) + [row] }}"
+      vars:
+        want: "{{ row_item.0.expected | regex_replace('\"', '') | regex_replace('\\s+', '') }}"
+        got_vm: "{{ row_item.1.stdout | default('') | regex_replace('\"', '') | regex_replace('\\s+', '') }}"
+        got_public: "{{ row_item.2.stdout | default('') | regex_replace('\"', '') | regex_replace('\\s+', '') }}"
+        row:
+          fqdn: "{{ row_item.0.fqdn }}"
+          type: "{{ row_item.0.type }}"
+          expected: "{{ row_item.0.expected }}"
+          vm: "{{ 'ok' if (want | length > 0 and want in got_vm) else ('MISS' if got_vm | length == 0 else 'DIFF') }}"
+          public: "{{ 'ok' if (want | length > 0 and want in got_public) else ('-' if got_public | length == 0 else 'DIFF') }}"
+          got_vm: "{{ row_item.1.stdout | default('') | trim }}"
+      loop: "{{ dns_checks | zip(vm_answers.results, public_answers.results) | list }}"
+      loop_control:
+        loop_var: row_item
+        label: "{{ row_item.0.fqdn }} {{ row_item.0.type }}"
+
+    - name: Show every record
+      ansible.builtin.debug:
+        msg: |
+          {{ '%-38s %-6s %-5s %-7s %s' | format('NAME', 'TYPE', 'VM', 'PUBLIC', 'ANSWER FROM THE VM') }}
+          {% for row in dns_rows %}
+          {{ '%-38s %-6s %-5s %-7s %s' | format(row.fqdn, row.type, row.vm, row.public,
+                                                (row.got_vm | replace('\n', ' ') | truncate(48, true))
+                                                if row.got_vm else '(no answer)') }}
+          {% endfor %}
+
+          VM     = answered by {{ ip }} itself: ok / DIFF (answered something
+                   else) / MISS (no answer -- BIND down, or port 53 blocked)
+          PUBLIC = answered via {{ public_resolver }}; "-" until the registrar
+                   delegation for the zone has propagated.

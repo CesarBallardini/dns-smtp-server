@@ -1,0 +1,8 @@
+# {{ ansible_managed }}
+# Dovecot userdb: ONLY accounts that own a mailbox. A send-only account is
+# absent here, so its IMAP login fails the userdb lookup and it can never
+# read mail -- it can only submit on 587.
+# user:password:uid:gid:gecos:home:shell:extra
+{% for account in postfix_accounts if account.mailbox %}
+{{ account.username }}::{{ postfix_vmail_uid }}:{{ postfix_vmail_gid }}::{{ postfix_mail_dir }}/{{ account.mailbox.domain }}/{{ account.mailbox.local_part }}::
+{% endfor %}

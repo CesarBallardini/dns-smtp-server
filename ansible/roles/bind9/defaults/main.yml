@@ -1,0 +1,31 @@
+---
+# Authoritative-only BIND9. Zones are fully described by variables:
+#
+# bind9_zones:
+#   - name: example.com
+#     ttl: 3600                              # optional, default bind9_default_ttl
+#     hostmaster: hostmaster.example.com.    # SOA RNAME (dots, trailing dot)
+#     nameservers: [ns1.example.com.]        # apex NS; first one is the SOA MNAME
+#     records:
+#       - { name: "@",   type: MX,    value: "10 mail.example.com." }
+#       - { name: "www", type: CNAME, value: "example.github.io." }
+#       - { name: "@",   type: TXT,   value: "v=spf1 mx -all", ttl: 300 }
+#
+# TXT values are given unquoted; the template quotes them and splits them into
+# 255-byte strings (needed for DKIM keys).
+bind9_zones: []
+
+bind9_zone_dir: /etc/bind/zones
+bind9_default_ttl: 3600
+
+# SOA timers (seconds).
+bind9_soa_refresh: 3600
+bind9_soa_retry: 900
+bind9_soa_expire: 1209600
+bind9_soa_negative_ttl: 300
+
+# Secondary nameserver IPs: allowed to AXFR and sent NOTIFY on changes.
+bind9_secondaries: []
+
+# Response rate limiting: blunts use of the server in reflection attacks.
+bind9_rrl_responses_per_second: 10

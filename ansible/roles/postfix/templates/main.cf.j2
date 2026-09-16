@@ -1,0 +1,105 @@
+# {{ ansible_managed }}
+compatibility_level = 3.6
+
+# ------------------------------------------------------------------ identity
+myhostname = {{ postfix_myhostname }}
+myorigin = $myhostname
+mydestination = $myhostname, localhost
+mynetworks = 127.0.0.0/8
+inet_interfaces = all
+inet_protocols = ipv4
+proxy_interfaces = {{ postfix_proxy_interfaces | join(', ') }}
+smtpd_banner = $myhostname ESMTP
+biff = no
+append_dot_mydomain = no
+readme_directory = no
+recipient_delimiter = +
+message_size_limit = {{ postfix_message_size_limit }}
+mailbox_size_limit = 0
+
+alias_maps = hash:/etc/aliases
+alias_database = hash:/etc/aliases
+
+# ------------------------------------------- the served domains
+# The domains are virtual MAILBOX domains, so an address with no mailbox and
+# no alias is rejected at RCPT instead of being accepted and bounced later.
+# virtual_alias_maps is consulted first, which is what makes forwarding and
+# local mailboxes coexist in the same domain.
+virtual_mailbox_domains = {{ postfix_domains | join(', ') }}
+virtual_alias_maps = hash:/etc/postfix/virtual
+virtual_mailbox_maps = hash:/etc/postfix/vmailbox
+virtual_mailbox_limit = 0
+{% if postfix_imap_enabled | bool %}
+virtual_transport = lmtp:unix:private/dovecot-lmtp
+{% endif %}
+
+# ----------------------------------------------------------------- TLS in
+smtpd_tls_cert_file = {{ postfix_tls_cert_file }}
+smtpd_tls_key_file = {{ postfix_tls_key_file }}
+smtpd_tls_security_level = may
+smtpd_tls_auth_only = yes
+smtpd_tls_protocols = >=TLSv1.2
+smtpd_tls_mandatory_protocols = >=TLSv1.2
+smtpd_tls_loglevel = 1
+smtpd_tls_received_header = yes
+smtpd_tls_session_cache_database = btree:${data_directory}/smtpd_scache
+
+# ---------------------------------------------------------------- TLS out
+smtp_tls_security_level = may
+smtp_tls_CApath = /etc/ssl/certs
+smtp_tls_loglevel = 1
+smtp_tls_session_cache_database = btree:${data_directory}/smtp_scache
+smtp_tls_policy_maps = hash:/etc/postfix/tls_policy
+
+# ------------------------------------------ SASL (enabled on 587 in master.cf)
+smtpd_sasl_type = dovecot
+smtpd_sasl_path = private/auth
+smtpd_sasl_auth_enable = no
+smtpd_sasl_security_options = noanonymous, noplaintext
+smtpd_sasl_tls_security_options = noanonymous
+smtpd_sender_login_maps = hash:/etc/postfix/sender_login
+
+# ----------------------------------------------------- inbound restrictions
+smtpd_helo_required = yes
+disable_vrfy_command = yes
+strict_rfc821_envelopes = yes
+smtpd_helo_restrictions =
+    permit_mynetworks,
+    reject_invalid_helo_hostname,
+    reject_non_fqdn_helo_hostname
+smtpd_sender_restrictions =
+    permit_mynetworks,
+    reject_non_fqdn_sender,
+    reject_unknown_sender_domain
+smtpd_relay_restrictions =
+    permit_mynetworks,
+    permit_sasl_authenticated,
+    reject_unauth_destination
+smtpd_recipient_restrictions =
+    permit_mynetworks,
+    reject_non_fqdn_recipient,
+    reject_unknown_recipient_domain{% for rbl in postfix_rbls %},
+    reject_rbl_client {{ rbl }}{% endfor %}
+
+smtpd_data_restrictions = reject_unauth_pipelining
+
+# --------------------------------------------------------- SRS (postsrsd)
+sender_canonical_maps = tcp:127.0.0.1:10001
+sender_canonical_classes = envelope_sender
+recipient_canonical_maps = tcp:127.0.0.1:10002
+recipient_canonical_classes = envelope_recipient, header_recipient
+
+# ---------------------------------------------------------- DKIM (milter)
+milter_default_action = accept
+milter_protocol = 6
+smtpd_milters = {{ postfix_milters | join(', ') }}
+non_smtpd_milters = $smtpd_milters
+
+# ------------------------------------------------------ optional smarthost
+# Mail from the served domains may go through a relay; SRS-rewritten
+# (forwarded) mail never does (see sender_relay.pcre).
+sender_dependent_relayhost_maps = pcre:/etc/postfix/sender_relay.pcre
+smtp_sasl_auth_enable = {{ 'yes' if postfix_relayhost else 'no' }}
+smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+smtp_sasl_security_options = noanonymous
+smtp_sasl_tls_security_options = noanonymous

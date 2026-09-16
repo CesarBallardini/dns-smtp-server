@@ -1,0 +1,162 @@
+# On-VM spec for the configured DNS + SMTP host. Run by
+# ansible/playbooks/verify.yml (`make vm-verify`), which passes .Vars:
+#   domains:        dnssmtp_domains ([{name, dkim_selector, records}])
+#   public_ip:      reserved public IPv4
+#   mail_hostname:  e.g. mail.gnandu.com.ar
+#   letsencrypt:    true | false
+#   mailboxes:      [{address, local_part, domain}] (may be empty)
+
+package:
+  bind9: { installed: true }
+  postfix: { installed: true }
+  postsrsd: { installed: true }
+  dovecot-core: { installed: true }
+  opendkim: { installed: true }
+  fail2ban: { installed: true }
+  chrony: { installed: true }
+  unattended-upgrades: { installed: true }
+  iptables-persistent: { installed: true }
+
+service:
+  ssh: { running: true }
+  named: { enabled: true, running: true }
+  postfix: { enabled: true, running: true }
+  postsrsd: { enabled: true, running: true }
+  dovecot: { enabled: true, running: true }
+  opendkim: { enabled: true, running: true }
+  fail2ban: { enabled: true, running: true }
+  chrony: { enabled: true, running: true }
+
+port:
+  udp:53: { listening: true }
+  tcp:53: { listening: true }
+  tcp:25: { listening: true }
+  tcp:587: { listening: true }
+  tcp:8891: { listening: true, ip: [127.0.0.1] }
+  tcp:10001: { listening: true, ip: [127.0.0.1] }
+{{- if .Vars.mailboxes }}
+  tcp:143: { listening: true }
+  tcp:993: { listening: true }
+{{- end }}
+
+user:
+  ops:
+    exists: true
+    groups: [sudo]
+
+file:
+  /etc/dovecot/passwd:
+    exists: true
+    group: dovecot
+    mode: "0640"
+{{- range .Vars.mailboxes }}
+  {{ $.Vars.mail_dir }}/{{ .domain }}:
+    exists: true
+    filetype: directory
+    owner: vmail
+{{- end }}
+{{- if .Vars.letsencrypt }}
+  /etc/letsencrypt/live/{{ .Vars.mail_hostname }}/fullchain.pem:
+    exists: true
+{{- end }}
+
+command:
+  named-config-and-zones:
+    exec: "named-checkconf -z"
+    exit-status: 0
+  postfix-config:
+    exec: "postfix check"
+    exit-status: 0
+  postfix-knows-public-ip:
+    exec: "postconf -h proxy_interfaces"
+    exit-status: 0
+    stdout:
+      - "{{ .Vars.public_ip }}"
+  postfix-tls-cert:
+    exec: "postconf -h smtpd_tls_cert_file"
+    exit-status: 0
+    stdout:
+{{- if .Vars.letsencrypt }}
+      - "/etc/letsencrypt/live/{{ .Vars.mail_hostname }}/fullchain.pem"
+{{- else }}
+      - "ssl-cert-snakeoil.pem"
+{{- end }}
+  swap-active:
+    exec: "swapon --show=NAME --noheadings"
+    exit-status: 0
+    stdout:
+      - "/swapfile"
+  firewall-accepts-before-reject:
+    exec: >-
+      iptables -S INPUT | awk '/-j REJECT/ { r = NR } /dnssmtp-/ { a = NR }
+      END { exit !(a && (!r || a < r)) }'
+    exit-status: 0
+  sshd-no-passwords:
+    exec: "sshd -T | grep -Ei '^(passwordauthentication|permitrootlogin) '"
+    exit-status: 0
+    stdout:
+      - "passwordauthentication no"
+      - "permitrootlogin no"
+  recursion-refused:
+    exec: "dig @127.0.0.1 example.com A"
+    exit-status: 0
+    stdout:
+      - "status: REFUSED"
+{{- if .Vars.mailboxes }}
+  # Dovecot must accept only the configured virtual accounts, never system
+  # users through PAM.
+  dovecot-no-pam:
+    exec: "doveconf -n passdb"
+    exit-status: 0
+    stdout:
+      - "passwd-file"
+      - "!/pam/"
+  imaps-handshake:
+    exec: >-
+      echo A LOGOUT | openssl s_client -quiet -connect 127.0.0.1:993
+      -servername {{ .Vars.mail_hostname }}
+      {{ if .Vars.letsencrypt }}-verify_return_error -verify_hostname {{ .Vars.mail_hostname }}{{ end }} 2>&1
+    exit-status: 0
+    stdout:
+      - "* OK"
+  # Cleartext IMAP logins are refused on unencrypted connections. Only the
+  # setting is checked here: Dovecot treats a connection from the machine
+  # itself as already secure, so no probe run ON the VM can prove the
+  # behaviour. playbooks/verify.yml tests it from the controller instead.
+  imap-no-cleartext-auth:
+    exec: "doveconf -h disable_plaintext_auth"
+    exit-status: 0
+    stdout:
+      - "yes"
+{{- range .Vars.mailboxes }}
+  mailbox-{{ .address }}-known-to-postfix:
+    exec: "postmap -q {{ .address }} hash:/etc/postfix/vmailbox"
+    exit-status: 0
+  mailbox-{{ .address }}-known-to-dovecot:
+    exec: "doveadm user {{ .address }}"
+    exit-status: 0
+    stdout:
+      - "{{ $.Vars.mail_dir }}/{{ .domain }}/{{ .local_part }}"
+{{- end }}
+{{- end }}
+{{- range .Vars.domains }}
+  zone-{{ .name }}-soa-authoritative:
+    exec: "dig @127.0.0.1 {{ .name }} SOA +norec"
+    exit-status: 0
+    stdout:
+      - "status: NOERROR"
+      - "/flags: qr aa/"
+  zone-{{ .name }}-mx:
+    exec: "dig @127.0.0.1 {{ .name }} MX +short"
+    exit-status: 0
+    stdout:
+      - "{{ $.Vars.mail_hostname }}."
+  zone-{{ .name }}-dkim:
+    exec: "dig @127.0.0.1 {{ .dkim_selector }}._domainkey.{{ .name }} TXT +short"
+    exit-status: 0
+    stdout:
+      - "v=DKIM1"
+  opendkim-key-{{ .name }}:
+    exec: "test -s /etc/opendkim/keys/{{ .name }}.{{ .dkim_selector }}.private"
+    exit-status: 0
+{{- end }}

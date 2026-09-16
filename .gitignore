@@ -1,0 +1,19 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+.cache/
+
+# Ansible / molecule runtime state
+.ansible/
+.molecule/
+*.retry
+
+# Environment-specific config and secrets live in ~/.dns-smtp-server/, never
+# in this repo. These patterns guard against an accidental copy landing here.
+ansible/inventory.yml
+ansible/group_vars/all.yml
+*.key
+*.pem
+smtp-users/
+dkim/

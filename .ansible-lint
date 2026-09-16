@@ -1,0 +1,15 @@
+---
+profile: production
+
+exclude_paths:
+  - .venv/
+  - .ansible/
+  - ansible/group_vars/all.yml.example
+  - ansible/inventory.yml.example
+  - ansible/tests/
+  - ansible/roles/*/molecule/default/tests/
+
+# Variables in roles are prefixed with the role name (bind9_, postfix_, ...);
+# the playbooks' shared inputs use the dnssmtp_ / oci_ prefixes.
+skip_list:
+  - var-naming[no-role-prefix]

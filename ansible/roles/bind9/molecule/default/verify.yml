@@ -1,0 +1,12 @@
+---
+- name: Verify -- bind9 serves the zones authoritatively
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Install goss
+      ansible.builtin.include_tasks: ../../../../tasks/install-goss.yml
+
+    - name: Validate with goss
+      ansible.builtin.include_tasks: ../../../../tasks/run-goss.yml
+      vars:
+        goss_spec: "{{ playbook_dir }}/tests/bind9.goss.yaml"

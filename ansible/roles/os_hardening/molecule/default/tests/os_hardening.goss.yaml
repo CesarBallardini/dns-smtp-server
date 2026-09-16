@@ -1,0 +1,85 @@
+# What os_hardening must produce. Swap is checked on the real VM only
+# (goss/host-prep.yaml).
+
+---
+user:
+  ops:
+    exists: true
+    home: /home/ops
+    shell: /bin/bash
+    groups:
+      - sudo
+
+file:
+  /etc/sudoers.d/90-ops-nopasswd:
+    exists: true
+    mode: "0440"
+    contains:
+      - "ops ALL=(ALL) NOPASSWD:ALL"
+  /home/ops/.ssh/authorized_keys:
+    exists: true
+    owner: ops
+    contains:
+      - "molecule@test"
+  /etc/ssh/sshd_config.d/10-hardening.conf:
+    exists: true
+    contains:
+      - "PasswordAuthentication no"
+      - "PermitRootLogin no"
+  /etc/fail2ban/jail.local:
+    exists: true
+    contains:
+      - "[sshd]"
+      - "[postfix]"
+      - "[postfix-sasl]"
+      - "[dovecot]"
+  /etc/apt/apt.conf.d/20auto-upgrades:
+    exists: true
+    contains:
+      - 'APT::Periodic::Unattended-Upgrade "1"'
+  /etc/iptables/rules.v4:
+    exists: true
+    contains:
+      - '--dport 25 -m comment --comment "dnssmtp-25-tcp" -j ACCEPT'
+      - '--dport 53 -m comment --comment "dnssmtp-53-udp" -j ACCEPT'
+
+package:
+  fail2ban:
+    installed: true
+  chrony:
+    installed: true
+  unattended-upgrades:
+    installed: true
+  iptables-persistent:
+    installed: true
+
+service:
+  fail2ban:
+    enabled: true
+    running: true
+
+command:
+  sshd-effective-config:
+    exec: "sshd -T | grep -Ei '^(passwordauthentication|permitrootlogin) '"
+    exit-status: 0
+    stdout:
+      - "passwordauthentication no"
+      - "permitrootlogin no"
+  # Every service ACCEPT must sit BEFORE the REJECT rule, both live and in
+  # the persisted file.
+  accept-rules-before-reject-live:
+    exec: >-
+      iptables -S INPUT | awk '/-j REJECT/ { r = NR } /dnssmtp-/ { a = NR }
+      END { exit !(a && r && a < r) }'
+    exit-status: 0
+  accept-rules-before-reject-persisted:
+    exec: >-
+      awk '/^-A INPUT -j REJECT/ { r = NR } /dnssmtp-/ { a = NR }
+      END { exit !(a && r && a < r) }' /etc/iptables/rules.v4
+    exit-status: 0
+  fail2ban-jails-active:
+    exec: "fail2ban-client status"
+    exit-status: 0
+    stdout:
+      - "sshd"
+      - "postfix"

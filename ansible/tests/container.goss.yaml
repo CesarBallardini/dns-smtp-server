@@ -1,0 +1,95 @@
+# Self-test for the controller image (registry.invalid/dns-smtp-server-ansible).
+#
+#     make ansible-selftest
+
+---
+command:
+  ansible-version:
+    exec: "ansible --version"
+    exit-status: 0
+    stdout: ["ansible "]
+  ansible-playbook-help:
+    exec: "ansible-playbook --help"
+    exit-status: 0
+  collection-oracle-oci:
+    exec: "ansible-galaxy collection list oracle.oci 2>&1"
+    exit-status: 0
+    stdout: ["oracle.oci"]
+  collection-ansible-posix:
+    exec: "ansible-galaxy collection list ansible.posix 2>&1"
+    exit-status: 0
+    stdout: ["ansible.posix"]
+  collection-community-docker:
+    exec: "ansible-galaxy collection list community.docker 2>&1"
+    exit-status: 0
+    stdout: ["community.docker"]
+  oci-sdk-importable:
+    exec: "python -c 'import oci; print(oci.__version__)'"
+    exit-status: 0
+  docker-sdk-importable:
+    exec: "python -c 'import docker; print(docker.__version__)'"
+    exit-status: 0
+  # The Dovecot passwd file is rendered with password_hash('sha512') on the
+  # controller. It must hash at all (Python 3.13 dropped the crypt module)
+  # AND be deterministic for a fixed salt, or every run would rewrite the
+  # file and restart Dovecot. Braces are avoided here: goss renders its spec
+  # as a Go template, so a Jinja expression would be eaten by it.
+  password-hash-sha512-deterministic:
+    exec: >-
+      python -c "from ansible.plugins.filter.core import get_encrypted_password as h;
+      a = h('x', 'sha512', salt='saltsaltsaltsalt');
+      b = h('x', 'sha512', salt='saltsaltsaltsalt');
+      print(a[:3], 'DETERMINISTIC' if a == b else 'RANDOM')"
+    exit-status: 0
+    stdout:
+      - "$6$ DETERMINISTIC"
+  molecule-drivers:
+    exec: "molecule drivers"
+    exit-status: 0
+    stdout: ["docker"]
+  # molecule's docker driver shells out to this client against the mounted
+  # host socket.
+  docker-cli:
+    exec: "docker --version"
+    exit-status: 0
+    stdout: ["Docker version"]
+  ansible-lint-version:
+    exec: "ansible-lint --version"
+    exit-status: 0
+  yamllint-version:
+    exec: "yamllint --version"
+    exit-status: 0
+  oci-cli-version:
+    exec: "oci --version"
+    exit-status: 0
+    stdout: ["3."]
+  goss-version:
+    exec: "goss --version"
+    exit-status: 0
+  dig-installed:
+    exec: "dig -v 2>&1"
+    exit-status: 0
+    stdout: ["DiG"]
+  openssl-installed:
+    exec: "openssl version"
+    exit-status: 0
+  ssh-installed:
+    exec: "ssh -V 2>&1"
+    exit-status: 0
+    stdout: ["OpenSSH"]
+  workspace-mounted:
+    exec: "test -f /workspace/pyproject.toml && test -f /workspace/ansible/playbooks/host-prep.yml"
+    exit-status: 0
+
+file:
+  /opt/dns-smtp-server-venv/bin/ansible-playbook:
+    exists: true
+  /usr/local/bin/entrypoint.sh:
+    exists: true
+    mode: "0755"
+
+env:
+  PATH:
+    match-regexp: "^/opt/dns-smtp-server-venv/bin:"
+  ANSIBLE_COLLECTIONS_PATH:
+    value: "/usr/share/ansible/collections"

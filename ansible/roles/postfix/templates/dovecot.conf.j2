@@ -1,0 +1,95 @@
+# {{ ansible_managed }}
+# Dovecot serves two purposes here:
+#   - SASL backend for Postfix submission (587), always;
+#   - IMAP mailboxes + LMTP delivery, when postfix_mailboxes is non-empty.
+# The stock conf.d/ tree is deliberately NOT included: it would enable PAM
+# authentication against system accounts.
+protocols = {{ 'imap lmtp' if postfix_imap_enabled | bool else 'none' }}
+log_path = syslog
+
+auth_mechanisms = plain login
+auth_username_format = %Lu
+disable_plaintext_auth = yes
+
+passdb {
+  driver = passwd-file
+  args = scheme=SHA512-CRYPT username_format=%u /etc/dovecot/passwd
+}
+
+{% if postfix_imap_enabled | bool %}
+userdb {
+  driver = passwd-file
+  args = username_format=%u /etc/dovecot/users
+}
+
+mail_location = maildir:~/Maildir
+mail_uid = {{ postfix_vmail_uid }}
+mail_gid = {{ postfix_vmail_gid }}
+first_valid_uid = {{ postfix_vmail_uid }}
+last_valid_uid = {{ postfix_vmail_uid }}
+
+namespace inbox {
+  inbox = yes
+  mailbox Drafts {
+    special_use = \Drafts
+    auto = subscribe
+  }
+  mailbox Sent {
+    special_use = \Sent
+    auto = subscribe
+  }
+  mailbox Junk {
+    special_use = \Junk
+    auto = subscribe
+  }
+  mailbox Trash {
+    special_use = \Trash
+    auto = subscribe
+  }
+}
+
+ssl = yes
+ssl_cert = <{{ postfix_tls_cert_file }}
+ssl_key = <{{ postfix_tls_key_file }}
+ssl_min_protocol = TLSv1.2
+ssl_prefer_server_ciphers = yes
+
+service imap-login {
+  inet_listener imap {
+    port = 143
+  }
+  inet_listener imaps {
+    port = 993
+    ssl = yes
+  }
+}
+
+# Postfix delivers to mailboxes over this socket (virtual_transport).
+service lmtp {
+  unix_listener /var/spool/postfix/private/dovecot-lmtp {
+    mode = 0600
+    user = postfix
+    group = postfix
+  }
+}
+
+protocol lmtp {
+  postmaster_address = {{ postfix_root_alias | default('postmaster@' ~ postfix_myhostname, true) }}
+}
+{% else %}
+# No mailboxes: authentication only, no mail storage.
+userdb {
+  driver = static
+  args = uid=nobody gid=nogroup home=/nonexistent
+}
+ssl = no
+{% endif %}
+
+# SASL socket for Postfix's smtpd (chrooted in /var/spool/postfix).
+service auth {
+  unix_listener /var/spool/postfix/private/auth {
+    mode = 0660
+    user = postfix
+    group = postfix
+  }
+}

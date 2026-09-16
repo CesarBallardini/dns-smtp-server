@@ -1,0 +1,4 @@
+# Normalize text files to LF in the repository and on checkout. Shell scripts,
+# templates, and zone files are executed / parsed inside Linux (the controller
+# container and the VM), where CRLF breaks them.
+* text=auto eol=lf

@@ -1,0 +1,83 @@
+---
+# Print how to reach the VM: its address, SSH, and the exact settings for a
+# mail client (IMAP + SMTP), including where each password is stored.
+# Read-only: it changes nothing and never needs SSH to the VM.
+#
+#     make vm-info
+
+- name: Discover the VM
+  ansible.builtin.import_playbook: discover.yml
+
+- name: Show connection details
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    vm: "{{ hostvars['dnssmtp-' ~ dnssmtp_env_tag] }}"
+    ip: "{{ hostvars['dnssmtp-' ~ dnssmtp_env_tag].dnssmtp_public_ip }}"
+    mailboxes: "{{ postfix_mailboxes | default([]) }}"
+    le: "{{ postfix_letsencrypt_enabled | default(false) | bool }}"
+    # Before the registrar delegation exists, clients can still connect by IP.
+    server_name: "{{ dnssmtp_mail_hostname }}"
+
+  tasks:
+
+    - name: Show the VM and mail client settings
+      ansible.builtin.debug:
+        msg: |
+          =====================================================================
+          VM
+          =====================================================================
+          name        : {{ dnssmtp_instance_name }}   (tag dnssmtp={{ dnssmtp_env_tag }})
+          public IP   : {{ ip }}   (reserved -- survives make vm-destroy)
+          shape       : {{ oci_shape }}  in  {{ oci_availability_domain }}
+          ssh         : ssh ops@{{ ip }}        (or ubuntu@{{ ip }})
+
+          =====================================================================
+          Mail client (MUA) settings
+          =====================================================================
+          {% if mailboxes | length == 0 %}
+          No mailboxes are configured. Add them to postfix_mailboxes in
+          ~/.dns-smtp-server/group_vars/all.yml, then run: make vm-prep
+          {% else %}
+          Incoming  IMAP    host {{ server_name }}     port 993   SSL/TLS
+                            (or                        port 143   STARTTLS)
+          Outgoing  SMTP    host {{ server_name }}     port 587   STARTTLS
+          Auth              normal password (PLAIN/LOGIN); username = full address
+
+          {% if not le %}
+          NOTE: postfix_letsencrypt_enabled is false, so the server presents a
+          SELF-SIGNED certificate. Clients will warn, and a client that checks
+          names will reject it. Set it to true once {{ server_name }}
+          resolves publicly, then re-run make vm-prep.
+          {% endif %}
+          {% if server_name not in (dnssmtp_domains | map(attribute='name') | join(' ')) %}
+          {% endif %}
+          Until DNS delegation is live you can point the client at the IP
+          {{ ip }} instead of {{ server_name }} -- expect a certificate name
+          warning, since the certificate is issued for the name, not the IP.
+
+          Accounts:
+          {% for box in mailboxes %}
+            - username : {{ box.address }}
+              password : cat ~/.dns-smtp-server/smtp-users/{{ box.address }}
+              may send as: {{ (box.senders | default([box.address])) | join(', ') }}
+          {% endfor %}
+          {% endif %}
+          {% if postfix_submission_users | default([]) | length > 0 %}
+
+          Send-only accounts (SMTP 587 only, no IMAP):
+          {% for user in postfix_submission_users %}
+            - username : {{ user.username }}
+              password : cat ~/.dns-smtp-server/smtp-users/{{ user.username }}
+          {% endfor %}
+          {% endif %}
+
+          =====================================================================
+          DNS
+          =====================================================================
+          nameserver  : {{ dnssmtp_ns_hostname }}  ->  {{ ip }}   (glue at the registrar)
+          mail host   : {{ dnssmtp_mail_hostname }}  ->  {{ ip }}
+          zones       : {{ dnssmtp_domains | map(attribute='name') | join(', ') }}
+          check them  : make dns-check
+          =====================================================================

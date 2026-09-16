@@ -1,0 +1,88 @@
+---
+# Configure the DNS + SMTP VM.
+#
+#   1. discover.yml -- find the live instance by freeform_tags.dnssmtp =
+#      dnssmtp_env_tag and add it (with its reserved public IP) to the
+#      runtime `oracle_cloud` group.
+#   2. On that host -- derive the role inputs from the dnssmtp_* vars
+#      (zones, DKIM keys, aliases) and apply, in order:
+#        os_hardening -> opendkim -> postfix -> bind9
+#
+# Safe to re-run after any change to ~/.dns-smtp-server/group_vars/all.yml
+# (new records, aliases, users): every role is idempotent.
+#
+#     make vm-prep
+
+- name: Discover the VM
+  ansible.builtin.import_playbook: discover.yml
+
+# ---------------------------------------------------------- configure host
+- name: Configure the host (hardening, DKIM, Postfix, BIND9)
+  hosts: oracle_cloud
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Validate the mail + DNS inputs
+      ansible.builtin.assert:
+        that:
+          - dnssmtp_domains | length > 0
+          - dnssmtp_public_ip is defined
+          - dnssmtp_admin_email is defined
+          - "'@example.' not in dnssmtp_admin_email"
+          - (dnssmtp_admin_email.split('@') | last) not in (dnssmtp_domains | map(attribute='name'))
+        fail_msg: |
+          Fill dnssmtp_domains and dnssmtp_admin_email in
+          ~/.dns-smtp-server/group_vars/all.yml. The admin address must be
+          OUTSIDE the served domains (mail to it is forwarded off-box).
+
+    - name: Check that a DKIM private key exists for every domain (on the controller)
+      ansible.builtin.stat:
+        path: "{{ dnssmtp_dkim_key_dir }}/{{ item.name }}.{{ item.dkim_selector }}.key"
+      delegate_to: localhost
+      become: false
+      loop: "{{ dnssmtp_domains }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: dkim_key_stat
+
+    - name: Fail when a DKIM key is missing
+      ansible.builtin.fail:
+        msg: |
+          Missing DKIM key {{ dnssmtp_dkim_key_dir }}/{{ item.item.name }}.{{ item.item.dkim_selector }}.key
+          (~/.dns-smtp-server/dkim/ on your machine).
+          Generate it on your machine with:
+            make dkim-keygen DOMAIN={{ item.item.name }} SELECTOR={{ item.item.dkim_selector }}
+      loop: "{{ dkim_key_stat.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: not item.stat.exists
+
+    # Renders zones, DKIM key list, aliases, and domain list from the dnssmtp_*
+    # inputs once (the DKIM public keys are derived with openssl on the
+    # controller), then hands each role its own generic inputs.
+    - name: Derive role inputs from the dnssmtp_* vars
+      ansible.builtin.set_fact:
+        dnssmtp_derived: "{{ lookup('ansible.builtin.template', 'templates/dnssmtp-derived.yml.j2') | from_yaml }}"
+
+    - name: Set role inputs
+      ansible.builtin.set_fact:
+        opendkim_keys: "{{ dnssmtp_derived.opendkim_keys }}"
+        postfix_myhostname: "{{ dnssmtp_mail_hostname }}"
+        postfix_domains: "{{ dnssmtp_domains | map(attribute='name') | list }}"
+        postfix_proxy_interfaces: ["{{ dnssmtp_public_ip }}"]
+        postfix_root_alias: "{{ dnssmtp_admin_email }}"
+        # The admin aliases (postmaster@, abuse@, ...) first, so an explicit
+        # entry in postfix_virtual_aliases overrides them.
+        postfix_virtual_aliases: "{{ dnssmtp_derived.admin_aliases | combine(postfix_virtual_aliases | default({})) }}"
+        bind9_zones: "{{ dnssmtp_derived.bind9_zones }}"
+        # Alpine reads the same mailboxes over the loopback interface.
+        alpine_accounts: "{{ postfix_mailboxes | default([]) | map(attribute='address') | list }}"
+
+  roles:
+    - role: os_hardening
+    - role: opendkim
+    - role: postfix
+    - role: bind9
+    - role: alpine
+      when: dnssmtp_install_alpine | default(true) | bool

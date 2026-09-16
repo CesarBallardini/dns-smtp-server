@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+# From-header address pattern -> KeyTable entry. Subdomains (e.g. system
+# mail from mail.<domain>) sign with the parent domain's key.
+{% for key in opendkim_keys %}
+*@{{ key.domain }}	{{ key.selector }}._domainkey.{{ key.domain }}
+*@*.{{ key.domain }}	{{ key.selector }}._domainkey.{{ key.domain }}
+{% endfor %}

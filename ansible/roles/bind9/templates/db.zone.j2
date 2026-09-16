@@ -1,0 +1,11 @@
+; {{ ansible_managed }}
+$ORIGIN {{ zone.name }}.
+$TTL {{ zone.ttl | default(bind9_default_ttl) }}
+@	IN	SOA	{{ zone.nameservers[0] }} {{ zone.hostmaster }} (
+		{{ zone_serial }} ; serial
+		{{ bind9_soa_refresh }} ; refresh
+		{{ bind9_soa_retry }} ; retry
+		{{ bind9_soa_expire }} ; expire
+		{{ bind9_soa_negative_ttl }} ; negative TTL
+		)
+$INCLUDE {{ bind9_zone_dir }}/db.{{ zone.name }}.records

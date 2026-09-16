@@ -1,0 +1,88 @@
+{#
+  Derives the generic role inputs (bind9_zones, opendkim_keys, admin aliases)
+  from the dnssmtp_* vars. Rendered on the controller by host-prep.yml and
+  parsed with from_yaml; every scalar goes through to_json so the output is
+  valid YAML whatever the value contains.
+-#}
+{%- macro relative(host, zone) -%}
+{%- if host == zone -%}@{%- elif host.endswith('.' ~ zone) -%}{{ host[:-(zone | length + 1)] }}{%- endif -%}
+{%- endmacro -%}
+{#- Every A record ends up here as {fqdn, ip}, so the reverse zones below can
+    be built from exactly the same data as the forward zones. -#}
+{%- set a_records = [] -%}
+bind9_zones:
+{% for domain in dnssmtp_domains %}
+{%   set key_path = dnssmtp_dkim_key_dir ~ '/' ~ domain.name ~ '.' ~ domain.dkim_selector ~ '.key' %}
+{%   set dkim_pem = lookup('ansible.builtin.pipe', 'openssl pkey -in ' ~ (key_path | quote) ~ ' -pubout') %}
+{%   set dkim_p = dkim_pem | regex_replace('-----(BEGIN|END) PUBLIC KEY-----', '') | regex_replace('\\s', '') %}
+{%   set ns_rel = relative(dnssmtp_ns_hostname, domain.name) %}
+{%   set mail_rel = relative(dnssmtp_mail_hostname, domain.name) %}
+  - name: {{ domain.name | to_json }}
+    ttl: {{ dnssmtp_dns_ttl | int }}
+    hostmaster: {{ ('hostmaster.' ~ domain.name ~ '.') | to_json }}
+    nameservers: {{ ([dnssmtp_ns_hostname ~ '.'] + dnssmtp_extra_nameservers) | to_json }}
+    records:
+{%   if ns_rel %}
+{%     set _ = a_records.append({'fqdn': dnssmtp_ns_hostname, 'ip': dnssmtp_public_ip}) %}
+      - { name: {{ ns_rel | to_json }}, type: "A", value: {{ dnssmtp_public_ip | to_json }} }
+{%   endif %}
+{%   if mail_rel and mail_rel != ns_rel %}
+{%     set _ = a_records.append({'fqdn': dnssmtp_mail_hostname, 'ip': dnssmtp_public_ip}) %}
+      - { name: {{ mail_rel | to_json }}, type: "A", value: {{ dnssmtp_public_ip | to_json }} }
+{%   endif %}
+      - { name: "@", type: "MX", value: {{ ('10 ' ~ dnssmtp_mail_hostname ~ '.') | to_json }} }
+      - { name: "@", type: "TXT", value: {{ dnssmtp_spf | to_json }} }
+      - { name: "_dmarc", type: "TXT", value: {{ ('v=DMARC1; p=' ~ dnssmtp_dmarc_policy ~ '; rua=mailto:postmaster@' ~ domain.name) | to_json }} }
+      - { name: {{ (domain.dkim_selector ~ '._domainkey') | to_json }}, type: "TXT", value: {{ ('v=DKIM1; k=rsa; p=' ~ dkim_p) | to_json }} }
+{%   for record in domain.records | default([]) %}
+{%     if (record.type | upper) == 'A' %}
+{%       set fqdn = domain.name if record.name == '@' else record.name ~ '.' ~ domain.name %}
+{%       set _ = a_records.append({'fqdn': fqdn, 'ip': record.value}) %}
+{%     endif %}
+      - {{ record | to_json }}
+{%   endfor %}
+{% endfor %}
+{#- Reverse (PTR) zones, one per /24 listed in dnssmtp_reverse_networks.
+    A PTR is only ever answered if the owner of the address block delegates
+    the in-addr.arpa zone here, which is why this is opt-in per network. -#}
+{% for network in dnssmtp_reverse_networks | default([]) %}
+{%   set octets = network.split('.') %}
+  - name: {{ (octets[2] ~ '.' ~ octets[1] ~ '.' ~ octets[0] ~ '.in-addr.arpa') | to_json }}
+    ttl: {{ dnssmtp_dns_ttl | int }}
+    hostmaster: {{ ('hostmaster.' ~ dnssmtp_primary_domain ~ '.') | to_json }}
+    nameservers: {{ ([dnssmtp_ns_hostname ~ '.'] + dnssmtp_extra_nameservers) | to_json }}
+    records:
+{%   for record in a_records %}
+{%     if record.ip.startswith(network ~ '.') %}
+      - { name: {{ record.ip.split('.')[3] | to_json }}, type: "PTR", value: {{ (record.fqdn ~ '.') | to_json }} }
+{%     endif %}
+{%   endfor %}
+{% endfor %}
+opendkim_keys:
+{% for domain in dnssmtp_domains %}
+  - domain: {{ domain.name | to_json }}
+    selector: {{ domain.dkim_selector | to_json }}
+    private_key_src: {{ (dnssmtp_dkim_key_dir ~ '/' ~ domain.name ~ '.' ~ domain.dkim_selector ~ '.key') | to_json }}
+{% endfor %}
+{# postmaster@ / abuse@ / hostmaster@ are forwarded to the admin address,
+   unless that address already has a mailbox on this host. `{}` keeps the key
+   a mapping when every one of them is a mailbox. -#}
+{% set mailbox_addresses = postfix_mailboxes | default([]) | map(attribute='address') | map('lower') | list %}
+{#- A domain with a catch-all needs no role aliases: the catch-all already
+    delivers postmaster@ and friends to a mailbox on this host, which beats
+    forwarding them off-box (that needs outbound port 25). -#}
+{% set catchall_domains = (postfix_virtual_aliases | default({})).keys() | select('match', '^@') | map('regex_replace', '^@', '') | map('lower') | list %}
+{% set role_addresses = [] %}
+{% for domain in dnssmtp_domains %}
+{%   for localpart in ['postmaster', 'abuse', 'hostmaster'] %}
+{%     if (localpart ~ '@' ~ domain.name) | lower not in mailbox_addresses
+          and domain.name | lower not in catchall_domains %}
+{%       set _ = role_addresses.append(localpart ~ '@' ~ domain.name) %}
+{%     endif %}
+{%   endfor %}
+{% endfor %}
+admin_aliases: {% if role_addresses | length == 0 %}{}{% endif %}
+
+{% for address in role_addresses %}
+  {{ address | to_json }}: {{ dnssmtp_admin_email | to_json }}
+{% endfor %}

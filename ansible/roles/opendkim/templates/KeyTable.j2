@@ -1,0 +1,4 @@
+# {{ ansible_managed }}
+{% for key in opendkim_keys %}
+{{ key.selector }}._domainkey.{{ key.domain }}	{{ key.domain }}:{{ key.selector }}:/etc/opendkim/keys/{{ key.domain }}.{{ key.selector }}.private
+{% endfor %}

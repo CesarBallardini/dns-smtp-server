@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# The smarthost receives SASL credentials: never talk to it in cleartext.
+{% if postfix_relayhost %}
+{{ postfix_relayhost }}	encrypt
+{% endif %}

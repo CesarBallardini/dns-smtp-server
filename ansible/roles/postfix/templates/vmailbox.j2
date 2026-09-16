@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+# Addresses with a mailbox on this host. Delivery goes through LMTP to
+# Dovecot, which decides the real path from its userdb, so the value here
+# only has to be non-empty -- but it is kept accurate for readability.
+{% for account in postfix_accounts if account.mailbox %}
+{{ account.username }}	{{ account.mailbox.domain }}/{{ account.mailbox.local_part }}/
+{% endfor %}

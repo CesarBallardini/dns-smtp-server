@@ -1,0 +1,19 @@
+{#
+  One list for every account that can authenticate, so the passdb, the
+  sender-login map, and the IMAP userdb are built from a single shape:
+    {username, password, senders[], mailbox}   mailbox = null for send-only
+-#}
+{% for user in postfix_submission_users %}
+- username: {{ user.username | lower | to_json }}
+  password: {{ user.password | to_json }}
+  senders: {{ (user.senders | map('lower') | list) | to_json }}
+  mailbox: null
+{% endfor %}
+{% for box in postfix_mailboxes %}
+- username: {{ box.address | lower | to_json }}
+  password: {{ box.password | to_json }}
+  senders: {{ ((box.senders | default([box.address])) | map('lower') | list) | to_json }}
+  mailbox:
+    local_part: {{ (box.address | lower).split('@')[0] | to_json }}
+    domain: {{ (box.address | lower).split('@')[1] | to_json }}
+{% endfor %}

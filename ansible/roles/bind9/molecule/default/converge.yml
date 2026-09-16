@@ -1,0 +1,28 @@
+---
+- name: Converge -- apply bind9
+  hosts: all
+  become: true
+  vars:
+    bind9_zones:
+      - name: example.test
+        ttl: 3600
+        hostmaster: hostmaster.example.test.
+        nameservers: [ns1.example.test.]
+        records:
+          - { name: "ns1", type: "A", value: "192.0.2.10" }
+          - { name: "mail", type: "A", value: "192.0.2.10" }
+          - { name: "@", type: "MX", value: "10 mail.example.test." }
+          - { name: "@", type: "TXT", value: "v=spf1 mx -all" }
+          - { name: "_dmarc", type: "TXT", value: "v=DMARC1; p=none; rua=mailto:postmaster@example.test" }
+          - { name: "katra", type: "CNAME", value: "example.github.io.", ttl: 300 }
+          # Longer than 255 bytes: must be split into several strings.
+          - name: "s1._domainkey"
+            type: "TXT"
+            value: "v=DKIM1; k=rsa; p={{ 'A' * 392 }}"
+      - name: example2.test
+        hostmaster: hostmaster.example2.test.
+        nameservers: [ns1.example.test.]
+        records:
+          - { name: "@", type: "MX", value: "10 mail.example.test." }
+  roles:
+    - role: bind9

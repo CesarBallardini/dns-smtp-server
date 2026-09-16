@@ -1,0 +1,183 @@
+---
+# Verify the live DNS + SMTP VM, from the inside and from the internet.
+#
+#   1. discover.yml -- find the VM by tag.
+#   2. On the VM -- goss validates ansible/tests/host.goss.yaml (services,
+#      ports, config checks, every zone answered authoritatively).
+#   3. From the controller -- query the public IP like the rest of the
+#      internet does. Hard failures: the server itself misbehaves. Warnings:
+#      things outside this repo's control that are not done yet (registrar
+#      delegation, PTR, your ISP blocking outbound port 25).
+#
+#     make vm-verify
+
+- name: Discover the VM
+  ansible.builtin.import_playbook: discover.yml
+
+- name: Verify the host from the inside (goss)
+  hosts: oracle_cloud
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Install goss
+      ansible.builtin.include_tasks: ../tasks/install-goss.yml
+
+    - name: Validate with goss
+      ansible.builtin.include_tasks: ../tasks/run-goss.yml
+      vars:
+        goss_spec: "{{ playbook_dir }}/../tests/host.goss.yaml"
+        goss_vars:
+          domains: "{{ dnssmtp_domains }}"
+          public_ip: "{{ dnssmtp_public_ip }}"
+          mail_hostname: "{{ dnssmtp_mail_hostname }}"
+          letsencrypt: "{{ postfix_letsencrypt_enabled | default(false) | bool }}"
+          mail_dir: "{{ postfix_mail_dir | default('/var/mail/vhosts') }}"
+          # Single backslashes: a YAML folded scalar passes them through as
+          # written, so \\1 would reach the regex as a literal backslash.
+          mailboxes: >-
+            {{ postfix_mailboxes | default([]) | map(attribute='address') | map('lower')
+               | map('regex_replace', '^(.*)@(.*)$', '{"address": "\1@\2", "local_part": "\1", "domain": "\2"}')
+               | map('from_json') | list }}
+
+- name: Verify from the internet (controller)
+  hosts: oracle_cloud
+  gather_facts: false
+
+  vars:
+    ip: "{{ dnssmtp_public_ip }}"
+
+  tasks:
+    # ------------------------------------------------ hard: the server itself
+    - name: Zone answers authoritatively on the public IP
+      ansible.builtin.command:
+        argv: [dig, +norec, "@{{ ip }}", "{{ item.name }}", SOA]
+      delegate_to: localhost
+      register: soa
+      changed_when: false
+      failed_when: "'status: NOERROR' not in soa.stdout or ' aa' not in soa.stdout"
+      loop: "{{ dnssmtp_domains }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: MX points at the mail host
+      ansible.builtin.command:
+        argv: [dig, +short, "@{{ ip }}", "{{ item.name }}", MX]
+      delegate_to: localhost
+      register: mx
+      changed_when: false
+      failed_when: (dnssmtp_mail_hostname ~ '.') not in mx.stdout
+      loop: "{{ dnssmtp_domains }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: DKIM public key is published
+      ansible.builtin.command:
+        argv: [dig, +short, "@{{ ip }}", "{{ item.dkim_selector }}._domainkey.{{ item.name }}", TXT]
+      delegate_to: localhost
+      register: dkim
+      changed_when: false
+      failed_when: "'v=DKIM1' not in dkim.stdout"
+      loop: "{{ dnssmtp_domains }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Server is not an open resolver
+      ansible.builtin.command:
+        argv: [dig, "@{{ ip }}", example.com, A]
+      delegate_to: localhost
+      register: open_resolver
+      changed_when: false
+      failed_when: "'status: REFUSED' not in open_resolver.stdout"
+
+    - name: Submission (587) negotiates STARTTLS
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          echo QUIT | timeout 30 openssl s_client -brief -starttls smtp
+          -connect {{ ip }}:587 -servername {{ dnssmtp_mail_hostname }}
+          {{ '-verify_return_error -verify_hostname ' ~ dnssmtp_mail_hostname if postfix_letsencrypt_enabled | default(false) | bool else '' }}
+        executable: /bin/bash
+      delegate_to: localhost
+      register: starttls
+      changed_when: false
+
+    - name: IMAPS (993) answers with the mail certificate
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          echo "A LOGOUT" | timeout 30 openssl s_client -quiet -connect {{ ip }}:993
+          -servername {{ dnssmtp_mail_hostname }}
+          {{ '-verify_return_error -verify_hostname ' ~ dnssmtp_mail_hostname if postfix_letsencrypt_enabled | default(false) | bool else '' }}
+          2>&1 | grep -q '^\* OK'
+        executable: /bin/bash
+      delegate_to: localhost
+      register: imaps
+      changed_when: false
+      when: postfix_mailboxes | default([]) | length > 0
+
+    # The controller is a genuinely remote client, so Dovecot does not treat
+    # it as secure: a cleartext LOGIN on 143 must be refused here. (On the VM
+    # itself the same probe would be exempt and prove nothing.)
+    - name: IMAP (143) refuses a cleartext login before STARTTLS
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import imaplib, sys
+            client = imaplib.IMAP4(sys.argv[1], 143)
+            try:
+                client.login('probe@invalid.example', 'wrong-password')
+                print('ACCEPTED')
+            except imaplib.IMAP4.error as exc:
+                print('REFUSED', exc)
+          - "{{ ip }}"
+      delegate_to: localhost
+      register: imap_cleartext
+      changed_when: false
+      failed_when: "'REFUSED' not in imap_cleartext.stdout"
+      when: postfix_mailboxes | default([]) | length > 0
+
+    # --------------------------------------------- soft: outside this repo
+    - name: Port 25 banner (your ISP may block outbound 25)
+      ansible.builtin.wait_for:
+        host: "{{ ip }}"
+        port: 25
+        search_regex: "^220 "
+        timeout: 15
+      delegate_to: localhost
+      register: banner
+      failed_when: false
+
+    - name: Delegation seen by a public resolver
+      ansible.builtin.command:
+        argv: [dig, +short, "@1.1.1.1", "{{ item.name }}", NS]
+      delegate_to: localhost
+      register: delegation
+      changed_when: false
+      failed_when: false
+      loop: "{{ dnssmtp_domains }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Reverse DNS (PTR) of the public IP
+      ansible.builtin.command:
+        argv: [dig, +short, "@1.1.1.1", -x, "{{ ip }}"]
+      delegate_to: localhost
+      register: ptr
+      changed_when: false
+      failed_when: false
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: |
+          ==============================================================
+          Server checks on {{ ip }}: PASSED (zones, MX, DKIM, no open resolver, STARTTLS{{ ', IMAPS' if postfix_mailboxes | default([]) | length > 0 else '' }})
+
+          Port 25 from here:  {{ 'OK' if banner.match_groups is defined else 'NOT REACHABLE -- check from another network before worrying (many ISPs block 25)' }}
+          PTR {{ ip }}:  {{ ptr.stdout | default('') or 'MISSING -- open an OCI support request (README, Phase 2)' }}
+          {% for result in delegation.results %}
+          Delegation {{ result.item.name }}:  {{ 'OK' if (dnssmtp_ns_hostname ~ '.') in result.stdout else 'NOT YET -- set NS + glue at the registrar (README, Phase 2)' }}
+          {% endfor %}
+          ==============================================================

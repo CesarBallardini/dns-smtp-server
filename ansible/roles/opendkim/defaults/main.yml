@@ -1,0 +1,21 @@
+---
+# DKIM signing milter for Postfix.
+#
+# opendkim_keys:
+#   - domain: example.com
+#     selector: s1
+#     private_key_src: /etc/dns-smtp-server/dkim/example.com.s1.key   # path on the CONTROLLER
+#
+# The private keys are generated once on the operator's machine (so a VM
+# rebuild keeps the same public key in DNS) and copied here.
+opendkim_keys: []
+
+# Postfix connects with smtpd_milters = inet:127.0.0.1:8891.
+opendkim_socket: "inet:8891@127.0.0.1"
+
+# Mail from these hosts is signed. Mail submitted on 587 is signed because
+# Postfix tags that service with milter_macro_daemon_name=ORIGINATING.
+opendkim_internal_hosts:
+  - 127.0.0.1
+  - "::1"
+  - localhost
